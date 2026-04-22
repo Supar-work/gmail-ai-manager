@@ -1,0 +1,29 @@
+{
+  "name": "gmail-ai-filters",
+  "version": "0.0.1",
+  "private": true,
+  "packageManager": "pnpm@10.28.2",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "dev": "pnpm -r --parallel --filter @gaf/api --filter @gaf/web run dev",
+    "dev:api": "pnpm --filter @gaf/api run dev",
+    "dev:web": "pnpm --filter @gaf/web run dev",
+    "dev:desktop": "pnpm --filter @gaf/desktop run dev",
+    "build": "pnpm -r run build",
+    "build:webapi": "pnpm --filter @gaf/api run build && pnpm --filter @gaf/web run build",
+    "build:desktop": "pnpm --filter @gaf/desktop run build",
+    "lint": "pnpm -r run lint",
+    "typecheck": "pnpm -r run typecheck",
+    "test": "pnpm -r run test",
+    "db:migrate": "pnpm --filter @gaf/api run db:migrate",
+    "db:generate": "pnpm --filter @gaf/api run db:generate",
+    "db:studio": "pnpm --filter @gaf/api run db:studio",
+    "db:reset": "pnpm --filter @gaf/api run db:reset"
+  },
+  "devDependencies": {
+    "prettier": "^3.3.3",
+    "typescript": "^5.6.3"
+  }
+}

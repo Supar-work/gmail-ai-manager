@@ -1,0 +1,35 @@
+node_modules/
+dist/
+build/
+.next/
+coverage/
+.DS_Store
+.env
+.env.local
+.env.*.local
+*.log
+.pnpm-debug.log*
+.turbo/
+.cache/
+*.tsbuildinfo
+
+# iCloud metadata
+.icloud
+
+# SQLite — all DB files contain user data
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Rust / Tauri build outputs
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/
+
+# Terraform
+infra/**/.terraform/
+infra/**/*.tfstate
+infra/**/*.tfstate.*
+infra/**/*.tfvars
+!infra/**/*.tfvars.example
+infra/**/.terraform.lock.hcl

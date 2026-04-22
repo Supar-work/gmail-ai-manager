@@ -1,0 +1,211 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// SQLite has no native enum or JSON types. Enum columns are stored as strings
+// and validated at the app layer; object fields are JSON-stringified.
+
+model User {
+  id                  String     @id @default(cuid())
+  email               String     @unique
+  googleSub           String     @unique
+  timezone            String     @default("UTC")
+  encAccessToken      Bytes?
+  encRefreshToken     Bytes?
+  tokenScope          String?
+  tokenExpiresAt      DateTime?
+  watchExpiresAt      DateTime?
+  lastHistoryId       String?
+  status              String     @default("active") // active | needsReauth | paused
+  migratedAt          DateTime?
+  pollIntervalSec     Int        @default(120)
+  // Null = let Claude Code CLI pick its default. Otherwise a model id like
+  // "claude-haiku-4-5-20251001" passed as --model to each `claude -p` call.
+  claudeModel         String?
+  createdAt           DateTime   @default(now())
+  updatedAt           DateTime   @updatedAt
+
+  rules               Rule[]
+  filterBackups       FilterBackup[]
+  decisions           EmailDecision[]
+  scheduledActions    ScheduledAction[]
+  forwardingAddresses ForwardingAddress[]
+  classifyRuns        ClassifyRun[]
+  inboxMessages       InboxMessage[]
+  gmailFilters        GmailFilter[]
+}
+
+// Authoritative local mirror of every Gmail filter we've ever seen for this
+// user. The UI renders one row per record with an Enabled toggle:
+//   - enabled = true  → filter is present in Gmail (currentGmailId set)
+//   - enabled = false → filter was removed from Gmail but we still hold the
+//                        definition and can re-create it on demand.
+// This model replaces the snapshot-blob FilterBackup (kept for back-compat).
+model GmailFilter {
+  id              String   @id @default(cuid())
+  userId          String
+  // Latest ID assigned by Gmail; null when disabled (not currently in Gmail).
+  currentGmailId  String?
+  // The Gmail filter's criteria + action, stored as JSON so we can re-create
+  // verbatim. Label name map snapshotted at sync time so a rename in Gmail
+  // doesn't orphan us.
+  criteriaJson    String
+  actionJson      String
+  labelMap        String   @default("{}") // { "Label_123": "my label" }
+  // Optional Claude-translated description, surfaced in the UI for readability.
+  naturalLanguage String?
+  enabled         Boolean  @default(true)
+  // Monotonic signature of (criteria+action). Used to dedupe when the user
+  // has the same filter in Gmail twice, or when sync sees a pre-existing one.
+  signature       String
+  syncedAt        DateTime @default(now())
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // No unique(userId, signature) — sync should be able to coexist with a
+  // disabled backup of the same criteria. Disabled rows are immutable
+  // archives; enabled rows are the live mirror of Gmail.
+  @@index([userId, signature])
+  @@index([userId, enabled])
+}
+
+// Local mirror of the user's Gmail inbox. We resync before every run so
+// classification reads message bodies from SQLite instead of fetching each
+// one from Gmail — which is the slow + serial part of a classify loop.
+// On sync we fetch only messages not already cached and drop rows for
+// messages that have left the inbox (archived/trashed in Gmail).
+model InboxMessage {
+  id             String    @id @default(cuid())
+  userId         String
+  gmailMessageId String
+  threadId       String?
+  historyId      String?
+  fromHeader     String?
+  toHeader       String?
+  subject        String?
+  snippet        String?
+  bodyText       String?
+  labelIds       String    @default("[]") // JSON-encoded string[]
+  dateHeader     String?
+  internalDate   DateTime?
+  fetchedAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, gmailMessageId])
+  @@index([userId, internalDate])
+}
+
+model ClassifyRun {
+  id         String    @id @default(cuid())
+  userId     String
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+  trigger    String    // manual | poll | schedule
+  status     String    @default("running") // running | done | error
+  ruleIds    String? // JSON array of rule ids or null for all
+  scanned    Int       @default(0)
+  matched    Int       @default(0)
+  applied    Int       @default(0)
+  scheduled  Int       @default(0)
+  skipped    Int       @default(0)
+  logJson    String    @default("[]") // JSON array of {t, level, msg}
+  errorMsg   String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, startedAt])
+}
+
+model Rule {
+  id                  String   @id @default(cuid())
+  userId              String
+  naturalLanguage     String
+  actionsJson         String   // JSON-encoded Action[]
+  originalFilterJson  String?  // JSON-encoded gmail filter
+  position            Int      @default(0)
+  enabled             Boolean  @default(true)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  scheduledActions ScheduledAction[]
+
+  @@index([userId, position])
+}
+
+model FilterBackup {
+  id           String   @id @default(cuid())
+  userId       String
+  snapshotJson String   // JSON-encoded snapshot
+  createdAt    DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+model EmailDecision {
+  id               String   @id @default(cuid())
+  userId           String
+  gmailMessageId   String
+  matchedRuleIds   String   // JSON-encoded string[]
+  reasoning        String   // JSON-encoded {ruleId, reasoning}[]
+  actionsApplied   String   // JSON-encoded
+  actionsScheduled String   // JSON-encoded
+  modelVersion     String
+  // Gmail's message historyId at the moment we classified. Bumping this
+  // (labels changed, moved, etc.) invalidates the cache for this message.
+  contentHistoryId String?
+  createdAt        DateTime @default(now())
+  // Updates on every upsert — compared against max(Rule.updatedAt) so a
+  // rule edit invalidates every stale decision for the user.
+  updatedAt        DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, gmailMessageId])
+  @@index([userId, createdAt])
+}
+
+model ScheduledAction {
+  id             String   @id @default(cuid())
+  userId         String
+  ruleId         String
+  gmailMessageId String
+  action         String   // JSON-encoded Action
+  runAt          DateTime
+  status         String   @default("pending") // pending | done | cancelled | failed | skipped
+  reasoning      String?
+  attempts       Int      @default(0)
+  lastError      String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  rule Rule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+
+  @@index([status, runAt])
+  @@index([userId, status])
+  @@index([ruleId])
+}
+
+model ForwardingAddress {
+  id        String   @id @default(cuid())
+  userId    String
+  address   String
+  verified  Boolean  @default(false)
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, address])
+}

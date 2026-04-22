@@ -1,0 +1,15 @@
+export const SYSTEM_LABEL_NAME: Record<string, string> = {
+  INBOX: 'Inbox',
+  SPAM: 'Spam',
+  TRASH: 'Trash',
+  UNREAD: 'Unread',
+  STARRED: 'Starred',
+  IMPORTANT: 'Important',
+  SENT: 'Sent',
+  DRAFT: 'Draft',
+  CATEGORY_PERSONAL: 'Personal',
+  CATEGORY_SOCIAL: 'Social',
+  CATEGORY_PROMOTIONS: 'Promotions',
+  CATEGORY_UPDATES: 'Updates',
+  CATEGORY_FORUMS: 'Forums',
+};
