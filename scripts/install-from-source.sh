@@ -118,6 +118,19 @@ if [ ! -f "$API_ENV_REPO" ]; then
   fi
 fi
 
+# Self-heal: older installer versions wrote TOKEN_ENC_KEY as a 64-char hex
+# string, but apps/api/src/auth/crypto.ts decodes it as base64 and requires
+# exactly 32 bytes. Hex decoded as base64 yields 48 bytes → startup crash.
+CURRENT_KEY="$(grep -E '^TOKEN_ENC_KEY=' "$API_ENV_REPO" | head -n1 | cut -d= -f2- || true)"
+if [ -n "$CURRENT_KEY" ] && ! node -e \
+  "try{process.exit(Buffer.from(process.argv[1],'base64').length===32?0:1)}catch{process.exit(1)}" \
+  "$CURRENT_KEY" 2>/dev/null; then
+  step "Regenerating TOKEN_ENC_KEY (existing value not valid base64(32 bytes))"
+  NEW_KEY="$(node -e "console.log(require('crypto').randomBytes(32).toString('base64'))")"
+  ESCAPED_KEY="$(printf '%s' "$NEW_KEY" | sed -e 's/[\/&|]/\\&/g')"
+  sed -i '' -E "s|^TOKEN_ENC_KEY=.*$|TOKEN_ENC_KEY=${ESCAPED_KEY}|" "$API_ENV_REPO"
+fi
+
 # ── 4. Build everything ──────────────────────────────────────────────────
 if [ "$SKIP_BUILD" = "0" ]; then
   step "Installing JS dependencies (pnpm install)"
