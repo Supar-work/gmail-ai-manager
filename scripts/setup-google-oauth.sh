@@ -19,6 +19,13 @@
 
 set -euo pipefail
 
+# If we were invoked via `curl … | bash`, stdin is the pipe — `read` would hit
+# EOF and, combined with `set -e`, silently exit after the first `pause`.
+# Reopen stdin from the controlling terminal so prompts actually block.
+if [ ! -t 0 ] && [ -r /dev/tty ]; then
+  exec < /dev/tty
+fi
+
 ENV_DIR="${1:-$HOME/Library/Application Support/gmail-ai-manager/api}"
 ENV_FILE="$ENV_DIR/.env"
 
