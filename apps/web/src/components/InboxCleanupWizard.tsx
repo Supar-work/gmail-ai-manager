@@ -448,65 +448,72 @@ function ProposalBody({
 }) {
   const actionChips = useMemo(() => describeActions(proposal.actions), [proposal.actions]);
 
+  // Layout mirrors RuleEditor (apps/web/src/pages/Home.tsx): label →
+  // textarea → description → preview → check-rule. The differences from
+  // a blank RuleEditor are (1) the textarea is seeded from the
+  // server-side propose loop, (2) actions render live (from the propose
+  // / repropose response) rather than waiting for a Check-rule click,
+  // and (3) the Matches block is specific to cleanup.
   return (
     <>
-      <div
+      <label
         className="muted"
-        style={{ fontSize: '0.7rem', textTransform: 'uppercase', letterSpacing: '0.05em' }}
+        style={{
+          fontSize: '0.7rem',
+          textTransform: 'uppercase',
+          letterSpacing: '0.05em',
+        }}
       >
-        Proposed rule for this group
-      </div>
-      <div style={{ fontWeight: 500, fontSize: '0.92rem', marginBottom: '0.3rem' }}>
-        {proposal.groupDescription}
-        {proposal.refineHistory.length > 0 && (
-          <span
-            className="muted"
-            title={proposal.refineHistory.map((h) => `${h.attempt}: ${h.note}`).join('\n')}
-            style={{ marginLeft: '0.5rem', fontSize: '0.78rem', fontWeight: 400 }}
-          >
-            (auto-refined {proposal.refineHistory.length}×)
-          </span>
-        )}
-      </div>
-
+        AI rule
+      </label>
       <textarea
         value={editText}
         onChange={(e) => onEditChange(e.target.value)}
         rows={3}
         spellCheck={false}
-        style={{ marginBottom: '0.4rem' }}
+        style={{ marginBottom: '0.35rem' }}
       />
-
-      <div className="row wrap" style={{ gap: '0.3rem', marginBottom: '0.4rem' }}>
-        <span className="muted" style={{ fontSize: '0.72rem' }}>
-          Actions:
-        </span>
-        {actionChips.map((c, i) => (
-          <span key={i} className={`chip ${c.kind}`}>
-            {c.label}
+      <div className="muted" style={{ fontSize: '0.75rem', marginBottom: '0.6rem' }}>
+        Drafted from this email. Edit freely — actions and matches update as you type.
+        {proposal.refineHistory.length > 0 && (
+          <span
+            title={proposal.refineHistory.map((h) => `${h.attempt}: ${h.note}`).join('\n')}
+            style={{ marginLeft: '0.4rem' }}
+          >
+            · auto-refined {proposal.refineHistory.length}×
           </span>
-        ))}
+        )}
       </div>
 
-      <div
-        className="muted"
-        style={{ fontSize: '0.78rem', marginBottom: '0.4rem', fontFamily: 'ui-monospace, Menlo, monospace' }}
-      >
-        Gmail query: {proposal.gmailQuery}
+      {/* Live "what it will do" — same .rule-preview styling as RuleEditor's
+          analyze output, but driven by the propose/repropose response so the
+          chips match the rule that will actually run. */}
+      <div className="rule-preview" style={{ marginBottom: '0.5rem' }}>
+        <div className="rule-preview-row">
+          <span className="rule-preview-label">Actions</span>
+          <div className="row wrap" style={{ gap: '0.3rem' }}>
+            {actionChips.map((c, i) => (
+              <span key={i} className={`chip ${c.kind}`}>
+                {c.label}
+              </span>
+            ))}
+            {updating && (
+              <span className="muted" style={{ fontSize: '0.78rem' }}>
+                · updating…
+              </span>
+            )}
+          </div>
+        </div>
       </div>
 
-      {/*
-        hideActions=true: the proposer already produced a canonical
-        action list above. Showing the analyzer's re-derived action list
-        (which comes from a different prompt with no email context) was
-        causing confusing "two conflicting action sets on one page"
-        situations. Warnings + suggestedRewrite still render.
-      */}
+      {/* Warnings + Suggested phrasing come from /api/rules/analyze; its
+          action chips are suppressed (hideActions) so we don't show two
+          disagreeing action lists on the same page. */}
       <RuleCheckPanel nl={editText} onAcceptRewrite={(s) => onEditChange(s)} hideActions />
 
       <div
         className="muted"
-        style={{ fontSize: '0.82rem', marginTop: '0.6rem', marginBottom: '0.3rem' }}
+        style={{ fontSize: '0.82rem', marginTop: '0.8rem', marginBottom: '0.3rem' }}
       >
         Matches — in inbox: <strong>{proposal.totals.inbox}</strong> · all mail:{' '}
         <strong>{proposal.totals.allMail}</strong>

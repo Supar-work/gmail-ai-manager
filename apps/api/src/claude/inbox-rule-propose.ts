@@ -82,20 +82,44 @@ RunAt variants (all optional — omitting means immediate):
 NEVER emit { type:"trash" }. Archive is the strongest allowed action.
 
 ═══════════════════════════════════════════════════════════════════════
-SELF-CONSISTENCY RULE (critical):
-Every concrete effect described in "naturalLanguage" MUST appear in
-"actions". Do not write English your action list doesn't realize.
+SELF-CONSISTENCY RULE (critical, both directions):
 
-Examples of violations to AVOID:
-  ✗ NL says "archive end of day" but actions only have addLabel + markImportant
-    → add { type:"archive", runAt:{ kind:"endOfDay" } }
-  ✗ NL says "label and snooze until Monday" but actions only have addLabel
-    → add the full snooze pattern (below)
-  ✗ NL says "forward to bob@" but actions have no forward
-    → add { type:"forward", to:"bob@..." }
+The naturalLanguage and the actions array describe the SAME rule and
+must not drift. Specifically:
 
-If you decide not to emit an action, do not mention that effect in the NL.
-Rewrite the NL to match the actions you actually ship.
+(a) Every concrete effect in "naturalLanguage" MUST appear in "actions".
+    ✗ NL "archive end of day" + actions only [addLabel]
+      → add { type:"archive", runAt:{ kind:"endOfDay" } }
+    ✗ NL "snooze until Monday" + actions only [addLabel]
+      → add the full snooze pattern (below)
+
+(b) Every action in "actions" MUST be described in "naturalLanguage".
+    The NL must name every distinct action type that appears (label,
+    archive, mark read, star, snooze, …). Don't silently add actions
+    the user wouldn't predict from reading the rule.
+    ✗ actions [addLabel, markRead, archive] but NL only "archive and label"
+      → NL should be "Label as X, mark read, and archive"
+    ✗ actions [addLabel "Shopping/Nespresso"] but NL "label as shopping"
+      → NL must name the exact label path: "label as Shopping/Nespresso"
+
+(c) NL must reference the EXACT label path from addLabel/removeLabel
+    actions — not a paraphrase. If you chose "Shopping/Nespresso", the
+    NL must say "Shopping/Nespresso" literally. This is what the user
+    will see in Gmail.
+
+(d) NL must state non-immediate timing. If any action has
+    runAt { kind:"endOfDay" / "relative" / "atTime" }, the NL must
+    say so ("at end of day", "in 2 hours", "tomorrow morning", …).
+
+Template to reach for:
+  "<verb> <emails matching X> as <LabelPath>, <other verbs>, and <final verb>[ at <timing>]."
+Examples:
+  ✓ "Label Nespresso promotional emails as Shopping/Nespresso, mark them read, and archive them."
+  ✓ "Label Stripe receipts as Receipts/Stripe and archive at end of day."
+  ✓ "Snooze GitHub Actions failure notifications until 9am tomorrow under snooze/<iso>."
+
+If in doubt, rewrite NL to match the actions you're actually shipping.
+Prefer accurate + slightly long over short + misleading.
 ═══════════════════════════════════════════════════════════════════════
 
 SNOOZE PATTERN — reach for it when the rule text combines
