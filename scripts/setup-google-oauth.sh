@@ -61,13 +61,14 @@ open_url() {
 
 prompt() {
   # $1 = prompt label, $2 = default (optional)
+  # Prompt text goes to stderr so $(prompt …) captures only the user's reply.
   local label="$1"
   local default="${2:-}"
   local reply
   if [ -n "$default" ]; then
-    printf "  %b (press ↵ to keep existing): " "$label"
+    printf "  %b (press ↵ to keep existing): " "$label" >&2
   else
-    printf "  %b: " "$label"
+    printf "  %b: " "$label" >&2
   fi
   read -r reply
   if [ -z "$reply" ] && [ -n "$default" ]; then
