@@ -152,6 +152,79 @@ Do NOT use markImportant for vague visibility phrasing like:
 When in doubt, prefer star over markImportant, or just skip the action.
 ═══════════════════════════════════════════════════════════════════════
 
+═══════════════════════════════════════════════════════════════════════
+TODO / ACTION-ITEM DETECTION (critical):
+
+Read the source email body carefully and check whether it contains a
+pending action for THE USER (not for the sender). If there's a todo on
+the user, the rule MUST NOT archive matching emails — the user needs
+them to stay in the inbox until the todo is done.
+
+Signals a pending user action is in the email:
+  • Imperatives addressed to the user:
+      "please <do>", "could you <do>", "can you <do>", "feel free to
+      <do>", "let me know <X>", "reply when you can", "send me <X>"
+  • Open questions awaiting the user's answer
+  • Verifications or approvals awaiting the user:
+      "please confirm", "does this look right?", "do you agree?"
+  • Deadlines / time-bound asks: "by Monday", "before EOD"
+  • Requests for credentials, documents, or information from the user
+
+When one of these is present:
+  ✗ DO NOT emit { type:"archive" }
+  ✗ DO NOT emit { type:"markRead" } (the unread badge keeps the todo
+     visible — only emit markRead if the rule text literally asks for it)
+  ✓ DO emit the label action (so the email is still categorized)
+  ✓ Optionally emit { type:"star" } to highlight the todo
+  ✓ If the rule should only take action once the todo is resolved,
+     describe that behavior in the NL but do not encode it as an action
+
+NL phrasing when there's a pending todo:
+  ✓ "Label emails from UpWest as Work/UpWest and keep them in the inbox."
+  ✓ "Label replies from Gil at UpWest as Work/UpWest; leave them in inbox
+     so I can act on the todo."
+
+Example — the wrong call and the right call:
+  Email: "Hi, please feel free to cancel the hotel room as well."
+  ✗ actions [addLabel "Work/UpWest", markRead, archive]
+    NL "Archive brief response emails from work contacts…"
+    (archives an email with a pending "cancel the hotel room" todo)
+  ✓ actions [addLabel "Work/UpWest"]
+    NL "Label emails from UpWest contacts as Work/UpWest and keep them
+     in the inbox while a response or follow-up is pending."
+
+If the email is purely an acknowledgement with no todo
+("Thanks!", "got it", "perfect"), archive is fine.
+═══════════════════════════════════════════════════════════════════════
+
+═══════════════════════════════════════════════════════════════════════
+SPECIFICITY RULE — gmailQuery generalization:
+
+When turning one email into a class-matching Gmail query, prefer
+predicates the user can understand and trust at a glance:
+
+  ✓ from:someone@domain.com           (specific sender)
+  ✓ from:*@domain.com                 (all from a domain)
+  ✓ from:Nespresso@email.nespresso.com subject:"promo"
+  ✓ list:digest.substack.com          (mailing-list header)
+
+Avoid content heuristics that match too much or require reading the
+body:
+
+  ✗ subject:"brief"        (matches unrelated things)
+  ✗ subject:"confirmation" (very broad)
+  ✗ "work contacts"        (not a Gmail operator at all)
+  ✗ queries that combine many OR'd terms trying to match "tone"
+
+When the email is from a personal sender (a human, not a bot/service),
+default to from:their-address or from:*@their-domain. Do NOT try to
+build rules off the body content of one-off human replies — those
+rarely generalize.
+
+If the only viable predicate is too broad, narrow the rule so it at
+least matches this one email correctly; the user can loosen it later.
+═══════════════════════════════════════════════════════════════════════
+
 Gmail query — the "gmailQuery" field must be a valid Gmail search
 expression ("from:", "to:", "subject:", "list:", "has:", "newer_than:",
 "-label:", parens, OR). Prefer precise predicates (exact sender address,
@@ -222,6 +295,13 @@ single inbox email, produce:
   3. a Gmail search query that should match the same class of emails,
   4. a one-phrase group description (e.g. "Substack weekly digests"),
   5. a confidence between 0 and 1.
+
+Before emitting actions:
+  (a) Read the body carefully and apply the TODO DETECTION rule below.
+      If the email has a pending action for the user, DO NOT archive.
+  (b) Decide on the predicate that generalizes this email — see the
+      SPECIFICITY RULE below. Prefer sender / domain over body content
+      for human replies.
 
 Current time (UTC): ${nowIso}
 User timezone:      ${timezone}
