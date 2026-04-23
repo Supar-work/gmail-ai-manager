@@ -18,7 +18,7 @@ export function buildGmailFilterXml(
     `  <title>Mail Filters</title>`,
     `  <updated>${now}</updated>`,
     `  <author>`,
-    `    <name>Gmail AI Filters backup</name>`,
+    `    <name>Gmail AI Manager backup</name>`,
     `  </author>`,
     entries,
     `</feed>`,

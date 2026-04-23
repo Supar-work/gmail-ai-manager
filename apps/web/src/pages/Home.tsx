@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { Action } from '@gaf/shared';
+import type { Action } from '@gam/shared';
 import { apiGet, apiSend, ApiError } from '../lib/api.js';
 import { RunLogPanel, useActiveRun } from '../components/RunLogPanel.js';
 import {

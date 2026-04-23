@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { Action } from '@gaf/shared';
+import type { Action } from '@gam/shared';
 import type { GmailFilter } from '../gmail/filters.js';
 import { SYSTEM_LABEL_NAME } from './labels.js';
 import { runClaudeJson } from './client.js';

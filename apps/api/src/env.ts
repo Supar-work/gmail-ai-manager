@@ -7,7 +7,7 @@ const schema = z.object({
   PUBLIC_WEB_URL: z.string().url().default('http://localhost:5173'),
 
   // In dev: file:./dev.db (relative to apps/api). In the Tauri bundle:
-  // an absolute file path under ~/Library/Application Support/gmail-ai-filters.
+  // an absolute file path under ~/Library/Application Support/gmail-ai-manager.
   DATABASE_URL: z.string().min(1),
 
   SESSION_SECRET: z.string().min(16),

@@ -1,6 +1,6 @@
 import { Router, type Router as RouterT } from 'express';
 import { z } from 'zod';
-import { ActionSchema } from '@gaf/shared';
+import { ActionSchema } from '@gam/shared';
 import { requireUser, getUserId } from '../auth/middleware.js';
 import { prisma } from '../db/client.js';
 import { runClaudeJson } from '../claude/client.js';

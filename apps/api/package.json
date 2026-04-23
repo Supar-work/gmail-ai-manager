@@ -1,5 +1,5 @@
 {
-  "name": "@gaf/api",
+  "name": "@gam/api",
   "version": "0.0.1",
   "private": true,
   "type": "module",
@@ -15,7 +15,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@gaf/shared": "workspace:*",
+    "@gam/shared": "workspace:*",
     "@prisma/client": "^5.22.0",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",

@@ -282,6 +282,10 @@ textarea {
   align-items: center;
   justify-content: center;
   z-index: 10;
+  /* Allow the backdrop itself to scroll for screens shorter than a full
+     modal when max-height isn't enough (small laptops with DevTools open). */
+  overflow-y: auto;
+  padding: 1rem 0;
 }
 
 .modal {
@@ -291,6 +295,11 @@ textarea {
   padding: 1.25rem;
   max-width: 560px;
   width: 90%;
+  /* Keep the modal inside the viewport no matter how tall its content grows
+     (sample lists, multiple previews, etc.) — scroll inside instead of
+     clipping the footer off-screen. */
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
 }
 
 .modal h3 {
@@ -840,6 +849,32 @@ textarea {
   padding: 0.25rem 0.5rem;
 }
 
+.label-rec-top {
+  font-size: 0.85rem;
+  padding: 0.25rem 0.5rem;
+  max-width: 160px;
+}
+
+.label-rec-custom-top {
+  font-family: ui-monospace, 'SFMono-Regular', Menlo, monospace;
+  font-size: 0.85rem;
+  padding: 0.25rem 0.5rem;
+  max-width: 140px;
+}
+
+.label-rec-sep {
+  font-size: 0.9rem;
+  padding: 0 0.05rem;
+}
+
+.label-rec-sub {
+  flex: 1;
+  min-width: 120px;
+  font-family: ui-monospace, 'SFMono-Regular', Menlo, monospace;
+  font-size: 0.85rem;
+  padding: 0.25rem 0.5rem;
+}
+
 .label-rec-samples > summary {
   cursor: pointer;
   list-style: revert;
@@ -858,6 +893,73 @@ textarea {
   to {
     transform: rotate(360deg);
   }
+}
+
+/* ── Rule-rewrite pending state ─────────────────────────────────────────
+   Shown after applying a suggested label: Claude is regenerating the AI
+   rule's natural-language text. We want it obviously in-flight — a subtle
+   muted spinner wasn't enough. */
+
+.rule-rewriting-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.45rem 0.6rem;
+  margin-bottom: 0.4rem;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  color: var(--accent);
+  font-size: 0.82rem;
+  font-weight: 500;
+}
+
+.rule-rewriting-banner .pulse-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--accent);
+  animation: pulse-dot 1.1s ease-in-out infinite;
+  flex: 0 0 auto;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 0.35; transform: scale(0.85); }
+  50%      { opacity: 1;    transform: scale(1.15); }
+}
+
+.rule-rewriting-wrap {
+  position: relative;
+}
+
+/* Animated gradient sweep across the textarea while disabled, so the
+   whole field reads as "working on it". Uses a faint accent tint so the
+   old text stays legible underneath. */
+.rule-rewriting-wrap textarea {
+  animation: rewriting-glow 1.6s ease-in-out infinite;
+  background-image: linear-gradient(
+    110deg,
+    transparent 0%,
+    transparent 40%,
+    color-mix(in srgb, var(--accent) 14%, transparent) 50%,
+    transparent 60%,
+    transparent 100%
+  );
+  background-size: 220% 100%;
+  animation-name: rewriting-sweep, rewriting-glow;
+  animation-duration: 1.6s, 1.6s;
+  animation-iteration-count: infinite, infinite;
+  animation-timing-function: linear, ease-in-out;
+}
+
+@keyframes rewriting-sweep {
+  0%   { background-position: 120% 0; }
+  100% { background-position: -120% 0; }
+}
+
+@keyframes rewriting-glow {
+  0%, 100% { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+  50%      { border-color: color-mix(in srgb, var(--accent) 80%, var(--border)); }
 }
 
 .gmail-filter-toggle {

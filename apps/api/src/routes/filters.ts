@@ -1,6 +1,6 @@
 import { Router, type Router as RouterT } from 'express';
 import { z } from 'zod';
-import { ActionSchema } from '@gaf/shared';
+import { ActionSchema } from '@gam/shared';
 import { requireUser, getUserId } from '../auth/middleware.js';
 import { deleteFilter, listFilters, listLabels, type GmailFilter } from '../gmail/filters.js';
 import { GoogleTokenError, isInvalidGrant, markNeedsReauth } from '../gmail/client.js';

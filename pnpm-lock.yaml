@@ -17,7 +17,7 @@ importers:
 
   apps/api:
     dependencies:
-      '@gaf/shared':
+      '@gam/shared':
         specifier: workspace:*
         version: link:../../packages/shared
       '@prisma/client':
@@ -87,7 +87,7 @@ importers:
 
   apps/web:
     dependencies:
-      '@gaf/shared':
+      '@gam/shared':
         specifier: workspace:*
         version: link:../../packages/shared
       '@tanstack/react-query':

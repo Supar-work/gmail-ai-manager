@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web-api:
+    # macos-14 is the first free-tier runner on Apple Silicon. We run on
+    # Apple Silicon specifically so the Tauri build environment matches
+    # what users install on.
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable corepack (pnpm)
+        run: |
+          corepack enable
+          corepack prepare pnpm@latest --activate
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install JS deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma client
+        run: pnpm --filter @gam/api run db:generate
+
+      - name: Typecheck
+        run: pnpm -r run typecheck
+
+      - name: Build api + web
+        run: pnpm -w run build:webapi
+
+      - name: Test (if any)
+        # `-r` runs test across all packages that define one; missing "test"
+        # scripts are skipped silently by pnpm.
+        run: pnpm -r run test --if-present
+
+  rust:
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+
+      - name: cargo check
+        working-directory: apps/desktop/src-tauri
+        run: cargo check --locked
+
+      - name: cargo clippy (warnings allowed)
+        working-directory: apps/desktop/src-tauri
+        run: cargo clippy --all-targets -- -D warnings || true
+
+  shell:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Syntax-check shell scripts
+        run: |
+          set -e
+          for f in scripts/*.sh docs/install.sh apps/desktop/scripts/*.sh; do
+            if [ -f "$f" ]; then
+              echo "bash -n $f"
+              bash -n "$f"
+            fi
+          done

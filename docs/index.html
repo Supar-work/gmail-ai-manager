@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Gmail AI Manager — natural-language Gmail filters that run on your Mac</title>
+    <meta
+      name="description"
+      content="An open-source Mac menu-bar app that replaces Gmail's native filters with natural-language rules evaluated locally by Claude. Your inbox never leaves your machine."
+    />
+    <meta name="color-scheme" content="light dark" />
+    <link rel="icon" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text x='50%' y='58%' text-anchor='middle' font-size='24'>📬</text></svg>" />
+    <meta property="og:title" content="Gmail AI Manager" />
+    <meta property="og:description" content="Natural-language Gmail filters that run on your Mac. Open source." />
+    <meta property="og:type" content="website" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header class="hero">
+      <nav>
+        <span class="brand">📬 Gmail AI Manager</span>
+        <span class="nav-links">
+          <a href="#install">Install</a>
+          <a href="#oauth">OAuth setup</a>
+          <a href="#faq">FAQ</a>
+          <a href="https://github.com/Supar-work/gmail-ai-manager" target="_blank" rel="noopener">GitHub →</a>
+        </span>
+      </nav>
+
+      <div class="hero-inner">
+        <h1>Natural-language Gmail filters, running on your&nbsp;Mac.</h1>
+        <p class="sub">
+          Replace Gmail's rigid filter language with rules you can actually write —
+          <em>"archive Substack unless a friend wrote it"</em>,
+          <em>"file Stripe receipts under Finance and skip the inbox"</em>.
+          Evaluated locally by Claude Code. Your email never leaves your machine.
+        </p>
+
+        <div class="install" id="install">
+          <div class="install-label">Install in one shell command</div>
+          <pre><code id="install-cmd">curl -fsSL https://gmailaimanager.supar.work/install.sh | bash</code><button class="copy" type="button" data-copy="install-cmd" aria-label="Copy install command">Copy</button></pre>
+          <div class="install-fallback">
+            Before DNS is live, use the direct GitHub Pages URL:<br />
+            <code>curl -fsSL https://supar-work.github.io/gmail-ai-manager/install.sh | bash</code>
+          </div>
+          <div class="install-badges">
+            <span class="badge">macOS · Apple Silicon</span>
+            <span class="badge">MIT</span>
+            <span class="badge">builds from source</span>
+            <span class="badge">your data stays local</span>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <main>
+      <section class="how">
+        <h2>What happens when you run the installer</h2>
+        <ol class="timeline">
+          <li>
+            <strong>Checks your machine.</strong>
+            macOS Apple Silicon, Xcode CLI tools, <code>git</code>, Node ≥ 20, <code>pnpm</code>,
+            a Rust toolchain, and the Claude Code CLI. Missing pieces print exact install commands
+            instead of failing silently.
+          </li>
+          <li>
+            <strong>Clones to <code>~/src/gmail-ai-manager</code>.</strong>
+            Full source — audit it, diff it, patch it. Re-run <code>scripts/update.sh</code>
+            anytime to pull changes and rebuild.
+          </li>
+          <li>
+            <strong>Walks you through Google OAuth.</strong>
+            Creates your own Google Cloud project with a Desktop-app credential. Nothing is
+            shared between users; your Client ID / Secret live only in
+            <code>~/Library/Application Support/gmail-ai-manager/api/.env</code>.
+            <a href="#oauth">See the five-minute walkthrough below</a>.
+          </li>
+          <li>
+            <strong>Builds the Tauri bundle.</strong>
+            <code>pnpm build</code> for the Node sidecar + React UI, then
+            <code>cargo build --release</code> for the Rust menu-bar shell.
+            Takes ~3–6 minutes the first time; subsequent updates reuse caches.
+          </li>
+          <li>
+            <strong>Installs to <code>~/Applications</code>.</strong>
+            SQLite data lives under Application&nbsp;Support so macOS doesn't prompt for
+            Documents / iCloud access. Logs at
+            <code>~/Library/Logs/gmail-ai-manager/server.log</code>.
+          </li>
+        </ol>
+      </section>
+
+      <section class="how" id="oauth">
+        <h2>Bring-your-own Google OAuth (5 min)</h2>
+        <p class="sub narrow">
+          Gmail's filter/label APIs are "restricted" scopes — shared OAuth clients need to pass
+          Google's CASA security assessment. For a self-hosted local app, the friendlier path is
+          for each user to spin up their own Google Cloud project in "testing mode". The
+          installer opens the right URLs and asks you to paste two strings.
+        </p>
+        <ol class="timeline">
+          <li>
+            <strong>Create a project.</strong>
+            <a href="https://console.cloud.google.com/projectcreate" target="_blank" rel="noopener">console.cloud.google.com/projectcreate</a>
+            → name it <code>gmail-ai-manager</code>, no org, click Create.
+          </li>
+          <li>
+            <strong>Enable the Gmail API.</strong>
+            <a href="https://console.cloud.google.com/apis/library/gmail.googleapis.com" target="_blank" rel="noopener">Enable Gmail API</a>
+            in the new project.
+          </li>
+          <li>
+            <strong>Configure the OAuth consent screen.</strong>
+            <a href="https://console.cloud.google.com/auth/branding" target="_blank" rel="noopener">Branding page</a>:
+            App name = "Gmail AI Manager (Local)", audience = External. Add your Gmail address
+            under <em>Audience → Test users</em>.
+          </li>
+          <li>
+            <strong>Create a Desktop-app OAuth client.</strong>
+            <a href="https://console.cloud.google.com/auth/clients" target="_blank" rel="noopener">Credentials page</a>
+            → + Create Client → Application type = "Desktop app". Copy the Client ID +
+            Client secret that appear.
+          </li>
+          <li>
+            <strong>Paste into the installer prompt.</strong>
+            The terminal wizard writes the values to
+            <code>~/Library/Application Support/gmail-ai-manager/api/.env</code>
+            with <code>chmod 600</code>.
+          </li>
+          <li>
+            <strong>First sign-in shows an "unverified app" warning.</strong>
+            Expected — testing-mode clients don't carry a verified badge. Click
+            <em>Advanced → Go to Gmail AI Manager (unsafe)</em>. You are the app's publisher,
+            so the warning is about yourself.
+          </li>
+        </ol>
+      </section>
+
+      <section class="how" id="what">
+        <h2>What it actually does</h2>
+        <div class="grid">
+          <div class="card">
+            <h3>Natural-language rules</h3>
+            <p>Write rules in English. Each rule compiles to a JSON action list (label, archive,
+              reply, snooze…) via Claude. <em>Trash is never emitted</em> — archive is the
+              strongest action the app allows.</p>
+          </div>
+          <div class="card">
+            <h3>Imports your existing Gmail filters</h3>
+            <p>A per-filter wizard suggests a canonical label, shows sample matched emails, and
+              rewrites your rule text when you change the label. Translate one, a selection, or
+              all at once.</p>
+          </div>
+          <div class="card">
+            <h3>Suggested labels with migration</h3>
+            <p>Claude analyses 8 recent emails per filter and suggests a two-level canonical
+              label (e.g. <code>Family/Basis</code>). Accepting creates the label and moves
+              existing messages via Gmail's batchModify.</p>
+          </div>
+          <div class="card">
+            <h3>Local-first scheduler</h3>
+            <p>SQLite on disk, in-process poller, no cloud. Pause / resume / stop any run
+              from the tray. Every rule-change invalidates only the cache keys it affects.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="how" id="faq">
+        <h2>FAQ / troubleshooting</h2>
+        <details>
+          <summary>Why do I need my own Google Cloud project?</summary>
+          <p>Because Gmail's filter and label scopes are restricted. A published app with
+            those scopes must pass Google's CASA security audit (~$500–$10k + a few months).
+            A testing-mode client skips that entirely — you're the only authorized user and
+            Google trusts that you trust yourself. Takes 5 minutes.</p>
+        </details>
+        <details>
+          <summary>Does the app send my email anywhere?</summary>
+          <p>Only to Claude via the <code>claude</code> CLI on your machine. Messages are
+            fetched from Gmail, classified locally, and the result is stored in SQLite at
+            <code>~/Library/Application Support/gmail-ai-manager/data.db</code>. There's no
+            upstream server you're talking to.</p>
+        </details>
+        <details>
+          <summary>What happens on uninstall?</summary>
+          <p>Quit the menu-bar app, then
+            <code>rm -rf "~/Applications/Gmail AI Manager.app" "~/Library/Application Support/gmail-ai-manager" "~/Library/Logs/gmail-ai-manager"</code>.
+            Optionally delete the source checkout at <code>~/src/gmail-ai-manager</code> and
+            the Google Cloud project.</p>
+        </details>
+        <details>
+          <summary>The installer says "Gatekeeper blocked Gmail AI Manager".</summary>
+          <p>The bundle isn't codesigned (no Apple Developer ID). The installer strips the
+            quarantine bit automatically, but if macOS still complains:
+            <code>xattr -dr com.apple.quarantine "/Users/you/Applications/Gmail AI Manager.app"</code>,
+            then right-click the app and choose Open.</p>
+        </details>
+        <details>
+          <summary><code>claude_exited_1: 401 authentication_error</code></summary>
+          <p>The sidecar spawned <code>claude -p</code> with stale auth. Run
+            <code>claude login</code> in a fresh Terminal, then quit + relaunch Gmail AI Manager
+            from the tray.</p>
+        </details>
+        <details>
+          <summary>Does it auto-start?</summary>
+          <p>Yes. The installer registers a LaunchAgent at
+            <code>~/Library/LaunchAgents/work.supar.gam.plist</code> with
+            <code>RunAtLoad=true</code>, so the tray app comes up automatically on every
+            login — no need to touch the Finder icon. If it crashes, launchd restarts it;
+            if you quit it from the tray, it stays quit until next login (or
+            <code>launchctl kickstart gui/$(id -u)/work.supar.gam</code>).
+            Uninstall with <code>scripts/uninstall-launch-agent.sh</code>.</p>
+        </details>
+        <details>
+          <summary>How do I update?</summary>
+          <p><code>~/src/gmail-ai-manager/scripts/update.sh</code> — pulls main, rebuilds,
+            redeploys, restarts. Preserves your database and <code>.env</code>.</p>
+        </details>
+        <details>
+          <summary>How do I back up my rules / filters?</summary>
+          <p>Run <code>~/src/gmail-ai-manager/scripts/backup.sh</code>. It writes a
+            timestamped directory under
+            <code>~/Library/Application Support/gmail-ai-manager/backups/</code> containing:
+            a full SQLite snapshot (<code>data.db</code>), JSON exports of
+            <code>rules.json</code> + <code>gmail-filters.json</code>, and a human-readable
+            summary. The installer and updater automatically run a backup before making
+            changes. Restore with <code>scripts/restore.sh --full &lt;dir&gt;</code>
+            (replace everything) or <code>--merge &lt;dir&gt;</code> (upsert Rule +
+            GmailFilter rows only).</p>
+        </details>
+        <details>
+          <summary>Intel Mac / Linux / Windows?</summary>
+          <p>Not yet. The first release targets Apple Silicon only to keep the build surface
+            small. Track progress or 👍 the
+            <a href="https://github.com/Supar-work/gmail-ai-manager/issues" target="_blank" rel="noopener">issue tracker</a>.</p>
+        </details>
+      </section>
+
+      <footer>
+        <p>
+          <a href="https://github.com/Supar-work/gmail-ai-manager" target="_blank" rel="noopener">Source on GitHub</a>
+          · MIT license · maintained by
+          <a href="https://supar.work" target="_blank" rel="noopener">Supar Work</a>
+        </p>
+      </footer>
+    </main>
+
+    <script>
+      document.querySelectorAll('button.copy').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const id = btn.getAttribute('data-copy');
+          const el = document.getElementById(id);
+          if (!el) return;
+          try {
+            await navigator.clipboard.writeText(el.textContent.trim());
+            const orig = btn.textContent;
+            btn.textContent = 'Copied ✓';
+            setTimeout(() => { btn.textContent = orig; }, 1400);
+          } catch { /* clipboard blocked */ }
+        });
+      });
+    </script>
+  </body>
+</html>

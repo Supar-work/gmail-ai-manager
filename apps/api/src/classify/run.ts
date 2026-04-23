@@ -1,4 +1,4 @@
-import type { Action } from '@gaf/shared';
+import type { Action } from '@gam/shared';
 import { prisma } from '../db/client.js';
 import { applyAction } from '../gmail/actions.js';
 import { classifyEmail, type ClassifyEmail, type ClassifyRule } from '../claude/classifier.js';

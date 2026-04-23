@@ -1,4 +1,4 @@
-import type { Action } from '@gaf/shared';
+import type { Action } from '@gam/shared';
 
 export function describeAction(a: Action): string {
   switch (a.type) {

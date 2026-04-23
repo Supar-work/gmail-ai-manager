@@ -1,4 +1,4 @@
-# @gaf/desktop
+# @gam/desktop
 
 Tauri menu-bar shell. Spawns the Node API sidecar, shows a tray icon, and
 opens the web UI in the user's default browser.
@@ -24,12 +24,12 @@ pnpm tauri icon /path/to/1024x1024.png
 
 ```bash
 # from repo root
-pnpm --filter @gaf/api build   # compile TS → dist/server.js
-pnpm --filter @gaf/desktop dev # launches tray + sidecar
+pnpm --filter @gam/api build   # compile TS → dist/server.js
+pnpm --filter @gam/desktop dev # launches tray + sidecar
 ```
 
-`pnpm --filter @gaf/desktop dev` starts `tauri dev`, which in turn launches
-`pnpm --filter @gaf/api run dev` (watched TS) as defined in `tauri.conf.json`.
+`pnpm --filter @gam/desktop dev` starts `tauri dev`, which in turn launches
+`pnpm --filter @gam/api run dev` (watched TS) as defined in `tauri.conf.json`.
 In dev mode the sidecar spawn in `lib.rs` will no-op if `apps/api/dist` is
 missing — that's fine, the `beforeDevCommand` tsx-watch is running the API
 directly.
@@ -37,7 +37,7 @@ directly.
 ## Release build
 
 ```bash
-pnpm --filter @gaf/desktop build
+pnpm --filter @gam/desktop build
 ```
 
 Produces `apps/desktop/src-tauri/target/release/bundle/{macos,dmg}/`.

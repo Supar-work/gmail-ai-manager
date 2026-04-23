@@ -2,8 +2,8 @@
 # Install the API runtime + data files into a macOS-standard per-user
 # location so the tray app doesn't trigger iCloud / Documents TCC prompts.
 #
-#   ~/Library/Application Support/gmail-ai-filters/
-#     api/                 – deployed @gaf/api with its prod dependencies
+#   ~/Library/Application Support/gmail-ai-manager/
+#     api/                 – deployed @gam/api with its prod dependencies
 #     api/.env             – env file, DATABASE_URL rewritten to absolute path
 #     data.db              – SQLite database
 #
@@ -11,22 +11,22 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/../../.." && pwd)"
-DEST="$HOME/Library/Application Support/gmail-ai-filters"
+DEST="$HOME/Library/Application Support/gmail-ai-manager"
 APPS_DIR="$HOME/Applications"
-BUNDLE_SRC="$REPO/apps/desktop/src-tauri/target/release/bundle/macos/Gmail AI Filters.app"
-BUNDLE_DST="$APPS_DIR/Gmail AI Filters.app"
+BUNDLE_SRC="$REPO/apps/desktop/src-tauri/target/release/bundle/macos/Gmail AI Manager.app"
+BUNDLE_DST="$APPS_DIR/Gmail AI Manager.app"
 
 echo "[install] staging to $DEST"
 mkdir -p "$DEST"
 
 # ── 1. deploy the api package with its prod deps ─────────────────────────
-# `pnpm --filter @gaf/api deploy` produces a standalone directory: dist/,
+# `pnpm --filter @gam/api deploy` produces a standalone directory: dist/,
 # package.json, node_modules/ with only production deps flattened in.
 STAGE="$DEST/.stage-api"
 rm -rf "$STAGE"
 (
   cd "$REPO"
-  pnpm --filter @gaf/api --prod --legacy deploy "$STAGE"
+  pnpm --filter @gam/api --prod --legacy deploy "$STAGE"
 )
 
 # Prisma schema/migrations aren't in dist; copy them alongside.
@@ -41,7 +41,7 @@ mv "$STAGE" "$DEST/api"
 WEB_SRC="$REPO/apps/web/dist"
 WEB_DEST="$DEST/web/dist"
 if [[ ! -d "$WEB_SRC" ]]; then
-  echo "[install] $WEB_SRC missing — build it with \`pnpm --filter @gaf/web build\`" >&2
+  echo "[install] $WEB_SRC missing — build it with \`pnpm --filter @gam/web build\`" >&2
   exit 1
 fi
 rm -rf "$WEB_DEST"
@@ -63,7 +63,7 @@ sed -i '' -E "s|^DATABASE_URL=.*$|DATABASE_URL=file:${ABSOLUTE_DB}|" "$DEST/api/
 echo "[install] generating prisma client"
 (
   cd "$REPO"
-  DATABASE_URL="file:$ABSOLUTE_DB" pnpm --filter @gaf/api exec prisma generate \
+  DATABASE_URL="file:$ABSOLUTE_DB" pnpm --filter @gam/api exec prisma generate \
     --schema "$DEST/api/prisma/schema.prisma" >/dev/null
 )
 
@@ -80,7 +80,7 @@ if [[ ! -f "$DEST/data.db" ]]; then
     echo "[install] no source db; applying migrations fresh at $ABSOLUTE_DB"
     (
       cd "$REPO"
-      DATABASE_URL="file:$ABSOLUTE_DB" pnpm --filter @gaf/api exec prisma migrate deploy \
+      DATABASE_URL="file:$ABSOLUTE_DB" pnpm --filter @gam/api exec prisma migrate deploy \
         --schema "$DEST/api/prisma/schema.prisma"
     )
   fi
@@ -100,7 +100,7 @@ if [[ -d "$BUNDLE_SRC" ]]; then
   # first launch of an unsigned ad-hoc build.
   xattr -dr com.apple.quarantine "$BUNDLE_DST" 2>/dev/null || true
 else
-  echo "[install] bundle not found at $BUNDLE_SRC — run \`pnpm --filter @gaf/desktop exec tauri build\` first"
+  echo "[install] bundle not found at $BUNDLE_SRC — run \`pnpm --filter @gam/desktop exec tauri build\` first"
 fi
 
 echo "[install] done."

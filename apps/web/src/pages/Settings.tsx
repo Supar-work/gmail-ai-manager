@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { apiGet, apiSend, ApiError } from '../lib/api.js';
@@ -43,6 +43,7 @@ export function Settings() {
 
       <ClaudeModelSection />
       <SyncFrequencySection />
+      <BackupRestoreSection />
       <RunHistorySection onOpen={setViewingRunId} />
 
       {viewingRunId && (
@@ -194,6 +195,319 @@ function SyncFrequencySection() {
   );
 }
 
+
+// ── backup & restore ──────────────────────────────────────────────────────
+
+type ImportResult = {
+  mode: 'merge' | 'replace';
+  rulesImported: number;
+  gmailFiltersImported: number;
+};
+
+type ExportPayload = {
+  version: 1;
+  exportedAt?: string;
+  data: {
+    users?: unknown[];
+    rules: unknown[];
+    gmailFilters: unknown[];
+  };
+};
+
+/**
+ * UI surface for the same backup / restore flow that scripts/backup.sh
+ * offers on the CLI. Download triggers a plain file download from the
+ * server; restore accepts a JSON file and calls POST /api/backups/import.
+ *
+ * Replace mode is gated behind a typed confirmation ("replace") so an
+ * accidental button click can't wipe your rules.
+ */
+function BackupRestoreSection() {
+  const qc = useQueryClient();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [file, setFile] = useState<File | null>(null);
+  const [preview, setPreview] = useState<ExportPayload | null>(null);
+  const [mode, setMode] = useState<'merge' | 'replace'>('merge');
+  const [confirmText, setConfirmText] = useState('');
+  const [downloadStamp, setDownloadStamp] = useState<string | null>(null);
+
+  // Read + parse the file on selection so we can show counts before the
+  // user commits to importing.
+  useEffect(() => {
+    if (!file) {
+      setPreview(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const text = await file.text();
+        const parsed = JSON.parse(text) as ExportPayload;
+        if (cancelled) return;
+        if (!parsed || parsed.version !== 1 || !parsed.data) {
+          setPreview(null);
+          return;
+        }
+        setPreview(parsed);
+      } catch {
+        if (!cancelled) setPreview(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [file]);
+
+  const download = useMutation<void, Error>({
+    mutationFn: async () => {
+      // Plain fetch so we can stream the blob directly to a download.
+      const res = await fetch('/api/backups/export', { credentials: 'include' });
+      if (!res.ok) throw new Error(`download failed (${res.status})`);
+      const disposition = res.headers.get('content-disposition') ?? '';
+      const match = /filename="([^"]+)"/.exec(disposition);
+      const filename =
+        match?.[1] ?? `gmail-ai-manager-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      setDownloadStamp(new Date().toLocaleString());
+    },
+  });
+
+  const importMut = useMutation<ImportResult, Error, void>({
+    mutationFn: async () => {
+      if (!preview) throw new Error('no file loaded');
+      return apiSend<ImportResult>('POST', '/api/backups/import', {
+        payload: preview,
+        mode,
+      });
+    },
+    onSuccess: () => {
+      // Any cached list view needs to refetch.
+      qc.invalidateQueries({ queryKey: ['rules'] });
+      qc.invalidateQueries({ queryKey: ['gmail-filters'] });
+      qc.invalidateQueries({ queryKey: ['settings'] });
+    },
+  });
+
+  const counts = preview
+    ? {
+        rules: Array.isArray(preview.data.rules) ? preview.data.rules.length : 0,
+        filters: Array.isArray(preview.data.gmailFilters) ? preview.data.gmailFilters.length : 0,
+        users: Array.isArray(preview.data.users) ? preview.data.users.length : 0,
+      }
+    : null;
+
+  // Replace mode demands typing "replace" to confirm.
+  const confirmOk = mode === 'merge' || confirmText.trim().toLowerCase() === 'replace';
+  const importReady = preview != null && confirmOk && !importMut.isPending;
+
+  function reset() {
+    setFile(null);
+    setPreview(null);
+    setConfirmText('');
+    importMut.reset();
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  }
+
+  return (
+    <section className="settings-section">
+      <h2>Backup &amp; restore</h2>
+      <p className="muted" style={{ fontSize: '0.85rem' }}>
+        Export your AI rules, Gmail filter mirrors, and user settings as a single JSON file.
+        The file is also produced automatically on disk before every app update — look under{' '}
+        <code>~/Library/Application Support/gmail-ai-manager/backups/</code>.
+      </p>
+
+      {/* Download */}
+      <div className="row wrap" style={{ alignItems: 'center', marginTop: '0.3rem' }}>
+        <button
+          className="primary"
+          onClick={() => download.mutate()}
+          disabled={download.isPending}
+        >
+          {download.isPending ? 'Preparing…' : 'Download backup'}
+        </button>
+        {download.isError && (
+          <span className="banner error" style={{ padding: '0.3rem 0.6rem' }}>
+            {(download.error as Error).message}
+          </span>
+        )}
+        {downloadStamp && !download.isError && (
+          <span className="muted" style={{ fontSize: '0.78rem' }}>
+            Last download: {downloadStamp}
+          </span>
+        )}
+      </div>
+
+      {/* Restore */}
+      <div
+        className="panel"
+        style={{ marginTop: '1rem', padding: '0.9rem 1rem', fontSize: '0.9rem' }}
+      >
+        <div style={{ fontWeight: 500, marginBottom: '0.4rem' }}>Restore from file</div>
+        <p className="muted" style={{ fontSize: '0.82rem', marginTop: 0 }}>
+          Upload a <code>gmail-ai-manager-backup-*.json</code> file you previously downloaded
+          (or one produced by <code>scripts/backup.sh</code>). The file's{' '}
+          <code>userId</code> field is ignored — rows are always restored to your
+          currently-signed-in account.
+        </p>
+
+        <div className="row wrap" style={{ gap: '0.6rem' }}>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="application/json,.json"
+            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+          />
+          {file && (
+            <button onClick={reset} disabled={importMut.isPending}>
+              Clear
+            </button>
+          )}
+        </div>
+
+        {file && !preview && (
+          <div className="banner error" style={{ marginTop: '0.5rem' }}>
+            Not a valid Gmail AI Manager backup file (expected <code>version: 1</code>).
+          </div>
+        )}
+
+        {counts && (
+          <>
+            <div
+              className="muted"
+              style={{ fontSize: '0.82rem', marginTop: '0.5rem', marginBottom: '0.4rem' }}
+            >
+              File contains:{' '}
+              <strong>{counts.rules}</strong> rule{counts.rules === 1 ? '' : 's'}
+              {' · '}
+              <strong>{counts.filters}</strong> Gmail filter
+              {counts.filters === 1 ? '' : 's'}
+              {counts.users > 0 && (
+                <>
+                  {' · '}
+                  <strong>{counts.users}</strong> user settings
+                </>
+              )}
+              {preview?.exportedAt && (
+                <>
+                  {' · '}
+                  exported {new Date(preview.exportedAt).toLocaleString()}
+                </>
+              )}
+            </div>
+
+            <fieldset className="row wrap" style={{ border: 0, padding: 0, gap: '1rem' }}>
+              <label className="row" style={{ gap: '0.3rem', alignItems: 'flex-start' }}>
+                <input
+                  type="radio"
+                  name="import-mode"
+                  checked={mode === 'merge'}
+                  onChange={() => {
+                    setMode('merge');
+                    setConfirmText('');
+                  }}
+                />
+                <span>
+                  <strong>Merge</strong>{' '}
+                  <span className="muted" style={{ fontSize: '0.82rem' }}>
+                    Upsert rules + filters by id. Existing rows in the file overwrite; rows not in
+                    the file are kept.
+                  </span>
+                </span>
+              </label>
+              <label className="row" style={{ gap: '0.3rem', alignItems: 'flex-start' }}>
+                <input
+                  type="radio"
+                  name="import-mode"
+                  checked={mode === 'replace'}
+                  onChange={() => setMode('replace')}
+                />
+                <span>
+                  <strong>Replace</strong>{' '}
+                  <span className="muted" style={{ fontSize: '0.82rem' }}>
+                    Delete <em>all</em> your current rules + Gmail filter mirrors first, then
+                    insert the file. Destructive — requires typed confirmation.
+                  </span>
+                </span>
+              </label>
+            </fieldset>
+
+            {mode === 'replace' && (
+              <div style={{ marginTop: '0.5rem' }}>
+                <label
+                  className="muted"
+                  style={{ fontSize: '0.82rem', display: 'block', marginBottom: '0.2rem' }}
+                >
+                  Type <code>replace</code> to confirm:
+                </label>
+                <input
+                  type="text"
+                  value={confirmText}
+                  onChange={(e) => setConfirmText(e.target.value)}
+                  placeholder="replace"
+                  spellCheck={false}
+                  autoComplete="off"
+                  style={{ maxWidth: 160 }}
+                />
+              </div>
+            )}
+
+            <div className="row" style={{ marginTop: '0.6rem' }}>
+              <button
+                className="primary"
+                onClick={() => importMut.mutate()}
+                disabled={!importReady}
+                title={
+                  !preview
+                    ? 'No file loaded'
+                    : !confirmOk
+                      ? 'Type replace to confirm'
+                      : mode === 'replace'
+                        ? 'Replace every rule and Gmail filter in your local DB'
+                        : 'Merge rules and filters from the file into your local DB'
+                }
+              >
+                {importMut.isPending
+                  ? 'Restoring…'
+                  : mode === 'replace'
+                    ? 'Replace & import'
+                    : 'Merge import'}
+              </button>
+            </div>
+          </>
+        )}
+
+        {importMut.isError && (
+          <div className="banner error" style={{ marginTop: '0.5rem' }}>
+            Import failed:{' '}
+            {importMut.error instanceof ApiError
+              ? importMut.error.code
+              : (importMut.error as Error).message}
+          </div>
+        )}
+        {importMut.isSuccess && importMut.data && (
+          <div className="banner info" style={{ marginTop: '0.5rem' }}>
+            {importMut.data.mode === 'replace' ? 'Replaced' : 'Merged'}:{' '}
+            <strong>{importMut.data.rulesImported}</strong> rule
+            {importMut.data.rulesImported === 1 ? '' : 's'}
+            {' · '}
+            <strong>{importMut.data.gmailFiltersImported}</strong> Gmail filter
+            {importMut.data.gmailFiltersImported === 1 ? '' : 's'}. Other pages will refresh on
+            next visit.
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
 
 // ── run history ───────────────────────────────────────────────────────────
 

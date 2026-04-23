@@ -36,7 +36,10 @@ if (env.NODE_ENV !== 'production') {
   );
 }
 app.use(cookieParser(env.SESSION_SECRET));
-app.use(express.json({ limit: '1mb' }));
+// 10mb gives plenty of headroom for full-DB backup imports (a typical
+// user's rules + GmailFilter mirror is well under 1mb, but originalFilterJson
+// blobs can balloon for heavy Gmail users).
+app.use(express.json({ limit: '10mb' }));
 
 app.get('/healthz', (_req, res) => {
   res.json({ ok: true });

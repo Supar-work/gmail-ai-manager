@@ -1,5 +1,5 @@
 {
-  "name": "gmail-ai-filters",
+  "name": "gmail-ai-manager",
   "version": "0.0.1",
   "private": true,
   "packageManager": "pnpm@10.28.2",
@@ -7,20 +7,20 @@
     "node": ">=20.0.0"
   },
   "scripts": {
-    "dev": "pnpm -r --parallel --filter @gaf/api --filter @gaf/web run dev",
-    "dev:api": "pnpm --filter @gaf/api run dev",
-    "dev:web": "pnpm --filter @gaf/web run dev",
-    "dev:desktop": "pnpm --filter @gaf/desktop run dev",
+    "dev": "pnpm -r --parallel --filter @gam/api --filter @gam/web run dev",
+    "dev:api": "pnpm --filter @gam/api run dev",
+    "dev:web": "pnpm --filter @gam/web run dev",
+    "dev:desktop": "pnpm --filter @gam/desktop run dev",
     "build": "pnpm -r run build",
-    "build:webapi": "pnpm --filter @gaf/api run build && pnpm --filter @gaf/web run build",
-    "build:desktop": "pnpm --filter @gaf/desktop run build",
+    "build:webapi": "pnpm --filter @gam/api run build && pnpm --filter @gam/web run build",
+    "build:desktop": "pnpm --filter @gam/desktop run build",
     "lint": "pnpm -r run lint",
     "typecheck": "pnpm -r run typecheck",
     "test": "pnpm -r run test",
-    "db:migrate": "pnpm --filter @gaf/api run db:migrate",
-    "db:generate": "pnpm --filter @gaf/api run db:generate",
-    "db:studio": "pnpm --filter @gaf/api run db:studio",
-    "db:reset": "pnpm --filter @gaf/api run db:reset"
+    "db:migrate": "pnpm --filter @gam/api run db:migrate",
+    "db:generate": "pnpm --filter @gam/api run db:generate",
+    "db:studio": "pnpm --filter @gam/api run db:studio",
+    "db:reset": "pnpm --filter @gam/api run db:reset"
   },
   "devDependencies": {
     "prettier": "^3.3.3",

@@ -1,6 +1,6 @@
 import { Router, type Router as RouterT } from 'express';
 import { z } from 'zod';
-import { ActionSchema } from '@gaf/shared';
+import { ActionSchema } from '@gam/shared';
 import { requireUser, getUserId } from '../auth/middleware.js';
 import { prisma } from '../db/client.js';
 import {
@@ -9,7 +9,7 @@ import {
   syncGmailFilters,
 } from '../gmail/filter-mirror.js';
 import { GoogleTokenError, isInvalidGrant, markNeedsReauth } from '../gmail/client.js';
-import type { Action } from '@gaf/shared';
+import type { Action } from '@gam/shared';
 import type { GmailFilter } from '../gmail/filters.js';
 import { translateFilters } from '../claude/translator.js';
 import {

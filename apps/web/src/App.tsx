@@ -41,7 +41,7 @@ export function App() {
       {!onLogin && (
         <header className="topbar">
           <Link to="/" className="brand" style={{ textDecoration: 'none', color: 'inherit' }}>
-            Gmail AI Filters
+            Gmail AI Manager
           </Link>
           <div className="spacer" />
           {me && (

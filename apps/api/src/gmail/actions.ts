@@ -1,4 +1,4 @@
-import type { Action } from '@gaf/shared';
+import type { Action } from '@gam/shared';
 import type { gmail_v1 } from 'googleapis';
 import { gmailForUser } from './client.js';
 import { logger } from '../logger.js';

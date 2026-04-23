@@ -1,4 +1,4 @@
-import type { RunAt } from '@gaf/shared';
+import type { RunAt } from '@gam/shared';
 import { fromZonedTime, toZonedTime } from 'date-fns-tz';
 import { addDays, addHours, addMinutes, isWeekend, setHours, setMilliseconds, setMinutes, setSeconds } from 'date-fns';
 

@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { Action } from '@gaf/shared';
+import type { Action } from '@gam/shared';
 import { apiGet, apiSend, ApiError } from '../lib/api.js';
 import { RuleCheckPanel } from './RuleAnalyzer.js';
-import { LabelRecommendation } from './LabelRecommendation.js';
+import { LabelRecommendation, type Recommendation } from './LabelRecommendation.js';
 
 export type GmailFilterCriteria = {
   from?: string;
@@ -314,6 +314,10 @@ function GmailFilterRowView({
 // rules they've already committed stay; the rest is simply undone work.
 
 const TRANSLATE_PARALLEL = 3;
+// Label recs do their own Gmail sampling + Claude call, so we pre-warm them
+// alongside the translation pool. Kept slightly lower to avoid six concurrent
+// Claude subprocess spawns on a cold wizard-open.
+const RECOMMEND_PARALLEL = 2;
 
 type MaterializeOne = { ruleId: string; disabled: boolean };
 
@@ -377,6 +381,54 @@ function TranslateWizard({
       Array.from({ length: Math.min(TRANSLATE_PARALLEL, queue.length) }, () => worker()),
     ).catch(() => {
       /* per-item errors already captured */
+    });
+
+    return () => {
+      aborted = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Pre-warm label recommendations for every filter so each wizard page
+  // shows its suggestion instantly (and future reopens hit the 12h server
+  // cache even if the UI is torn down). Results are seeded into react-query
+  // under the same key LabelRecommendation uses, so its useQuery resolves
+  // from cache without issuing a second fetch.
+  const recommendStarted = useRef(false);
+  useEffect(() => {
+    if (recommendStarted.current) return;
+    recommendStarted.current = true;
+    if (rows.length === 0) return;
+    const queue = rows.map((r) => r.id);
+    let aborted = false;
+    let next = 0;
+
+    async function worker() {
+      while (!aborted) {
+        const i = next++;
+        if (i >= queue.length) return;
+        const mirrorId = queue[i]!;
+        // Skip if another source already populated it.
+        if (qc.getQueryData<Recommendation>(['label-recommendation', mirrorId])) {
+          continue;
+        }
+        try {
+          const rec = await apiGet<Recommendation>(
+            `/api/gmail-filters/${mirrorId}/label-recommendation`,
+          );
+          if (aborted) return;
+          qc.setQueryData<Recommendation>(['label-recommendation', mirrorId], rec);
+        } catch {
+          // Silent — the LabelRecommendation component will retry on mount
+          // and surface its own error banner.
+        }
+      }
+    }
+
+    Promise.all(
+      Array.from({ length: Math.min(RECOMMEND_PARALLEL, queue.length) }, () => worker()),
+    ).catch(() => {
+      /* per-item errors already handled */
     });
 
     return () => {
@@ -579,20 +631,26 @@ function TranslateWizard({
             >
               AI rule
             </label>
-            <textarea
-              value={currentText}
-              onChange={(e) => setEdits((prev) => ({ ...prev, [current.id]: e.target.value }))}
-              rows={3}
-              placeholder='e.g. "when email is from X, archive it"'
-              style={{ marginBottom: '0.4rem' }}
-              disabled={rewritingId === current.id}
-            />
             {rewritingId === current.id && (
-              <div className="muted" style={{ fontSize: '0.78rem', marginBottom: '0.4rem' }}>
-                <span className="spinner" style={{ verticalAlign: 'middle', marginRight: '0.35rem' }} />
-                Rewriting rule to use the new label…
+              <div className="rule-rewriting-banner" role="status" aria-live="polite">
+                <span className="pulse-dot" />
+                <span>Claude is rewriting the rule to use the new label…</span>
               </div>
             )}
+            <div
+              className={rewritingId === current.id ? 'rule-rewriting-wrap' : undefined}
+            >
+              <textarea
+                value={currentText}
+                onChange={(e) =>
+                  setEdits((prev) => ({ ...prev, [current.id]: e.target.value }))
+                }
+                rows={3}
+                placeholder='e.g. "when email is from X, archive it"'
+                style={{ marginBottom: '0.4rem' }}
+                disabled={rewritingId === current.id}
+              />
+            </div>
             <RuleCheckPanel
               nl={currentText}
               onAcceptRewrite={(s) => setEdits((prev) => ({ ...prev, [current.id]: s }))}
