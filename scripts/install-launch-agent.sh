@@ -59,6 +59,24 @@ cat > "$PLIST" <<PLIST_HEAD
 </plist>
 PLIST_HEAD
 
+# Detect where `claude` actually lives so the LaunchAgent's PATH
+# includes it — `spawn claude` from the sidecar fails with ENOENT
+# otherwise. launchd doesn't inherit the user's shell PATH.
+CLAUDE_PATH=""
+for cand in "$HOME/.local/bin" "$HOME/.claude/local" "/opt/homebrew/bin" "/usr/local/bin"; do
+  if [ -x "$cand/claude" ]; then
+    CLAUDE_PATH="$cand"
+    break
+  fi
+done
+
+# Fall back to a standard set even if `claude` wasn't found — the user
+# may install it after this script runs.
+PLIST_PATH="/usr/local/bin:/opt/homebrew/bin:$HOME/.local/bin:$HOME/.claude/local:/usr/bin:/bin:/usr/sbin:/sbin"
+if [ -n "$CLAUDE_PATH" ]; then
+  printf "  ${DIM}detected claude at %s/claude${RESET}\n" "$CLAUDE_PATH"
+fi
+
 /usr/libexec/PlistBuddy \
   -c "Add :Label string $LABEL" \
   -c "Add :ProgramArguments array" \
@@ -69,7 +87,8 @@ PLIST_HEAD
   -c "Add :StandardErrorPath string $LOG_DIR/launchd.err.log" \
   -c "Add :WorkingDirectory string $HOME" \
   -c "Add :EnvironmentVariables dict" \
-  -c "Add :EnvironmentVariables:PATH string /usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+  -c "Add :EnvironmentVariables:PATH string $PLIST_PATH" \
+  -c "Add :EnvironmentVariables:HOME string $HOME" \
   -c "Add :KeepAlive dict" \
   -c "Add :KeepAlive:SuccessfulExit bool false" \
   "$PLIST"
