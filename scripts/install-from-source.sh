@@ -89,24 +89,33 @@ fi
 
 # ── 3. Ensure a Google OAuth .env exists ─────────────────────────────────
 # The deployer (apps/desktop/scripts/install.sh) copies apps/api/.env into
-# the install dir. If neither exists yet, run the wizard so the user never
-# hits "GOOGLE_CLIENT_ID required" at launch.
-if [ ! -f "$API_ENV_REPO" ] && [ ! -f "$API_ENV_INSTALLED" ]; then
-  if [ "$SKIP_OAUTH" = "1" ]; then
-    echo "error: no .env file and --skip-oauth set. Create $API_ENV_REPO manually." >&2
-    exit 1
+# the install dir. $API_ENV_REPO MUST be a real file — not a symlink into
+# $DEST/api, because the deployer `rm -rf`s that directory before copying.
+# Older installer versions created such symlinks; dereference or delete them.
+if [ -L "$API_ENV_REPO" ]; then
+  if [ -e "$API_ENV_REPO" ]; then
+    step "Dereferencing apps/api/.env symlink to a real file"
+    TMP_ENV="$(mktemp)"
+    cp "$API_ENV_REPO" "$TMP_ENV"
+    rm -f "$API_ENV_REPO"
+    mv "$TMP_ENV" "$API_ENV_REPO"
+  else
+    rm -f "$API_ENV_REPO"  # dangling symlink from the broken flow
   fi
-  step "No .env file found — running Google OAuth setup wizard"
-  # Write into the installed location; we'll symlink the repo-local one to it.
-  mkdir -p "$DATA_DIR/api"
-  "$REPO/scripts/setup-google-oauth.sh" "$DATA_DIR/api"
 fi
 
-# Ensure apps/api/.env exists so the deployer's `cp` works. If only the
-# installed one exists, symlink it back so edits in either place stay in sync.
-if [ ! -f "$API_ENV_REPO" ] && [ -f "$API_ENV_INSTALLED" ]; then
-  step "Linking apps/api/.env → $API_ENV_INSTALLED"
-  ln -sf "$API_ENV_INSTALLED" "$API_ENV_REPO"
+if [ ! -f "$API_ENV_REPO" ]; then
+  if [ -f "$API_ENV_INSTALLED" ]; then
+    step "Restoring apps/api/.env from $API_ENV_INSTALLED"
+    cp "$API_ENV_INSTALLED" "$API_ENV_REPO"
+  elif [ "$SKIP_OAUTH" = "1" ]; then
+    echo "error: no .env file and --skip-oauth set. Create $API_ENV_REPO manually." >&2
+    exit 1
+  else
+    step "No .env file found — running Google OAuth setup wizard"
+    mkdir -p "$(dirname "$API_ENV_REPO")"
+    "$REPO/scripts/setup-google-oauth.sh" "$(dirname "$API_ENV_REPO")"
+  fi
 fi
 
 # ── 4. Build everything ──────────────────────────────────────────────────
