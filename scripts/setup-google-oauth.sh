@@ -138,15 +138,17 @@ cat <<'EOF'
 
   Opening:  https://console.cloud.google.com/auth/branding
 
-  Click GET STARTED and fill:
+  Click GET STARTED and step through the wizard:
     • App name:           Gmail AI Manager (Local)
     • User support email: <your email>
     • Audience:           External
     • Developer email:    <your email>
     • Agree to the Google user data policy, click CREATE.
 
-  Then under "Audience" click + ADD USERS and add the Gmail address you
-  want the app to manage. Only accounts listed here can sign in.
+  Then in the LEFT SIDEBAR (under "Google Auth Platform") click the
+  "Audience" tab. Scroll to "Test users", click + ADD USERS, and add
+  the Gmail address you want the app to manage. Only accounts listed
+  here can sign in while the app is in testing mode.
 EOF
 open_url "https://console.cloud.google.com/auth/branding"
 pause
