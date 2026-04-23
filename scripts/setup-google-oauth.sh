@@ -209,9 +209,34 @@ gen_hex() {
   node -e "console.log(require('crypto').randomBytes($1).toString('hex'))" 2>/dev/null || \
     openssl rand -hex "$1"
 }
+gen_base64() {
+  # $1 = byte count
+  node -e "console.log(require('crypto').randomBytes($1).toString('base64'))" 2>/dev/null || \
+    openssl rand -base64 "$1"
+}
+
+# TOKEN_ENC_KEY is consumed via Buffer.from(key, 'base64') in apps/api/src/
+# auth/crypto.ts and must decode to exactly 32 bytes; a 32-byte hex string
+# would decode (under base64 rules) to 48 bytes and crash the API at import.
+# Regenerate if the existing value isn't valid 32-byte base64.
+is_valid_token_enc_key() {
+  node -e "
+    try {
+      const n = Buffer.from(process.argv[1], 'base64').length;
+      process.exit(n === 32 ? 0 : 1);
+    } catch { process.exit(1); }
+  " "$1" 2>/dev/null
+}
 
 SESSION_SECRET="${EXISTING_SESSION_SECRET:-$(gen_hex 32)}"
-TOKEN_ENC_KEY="${EXISTING_TOKEN_ENC_KEY:-$(gen_hex 32)}"
+if [ -n "$EXISTING_TOKEN_ENC_KEY" ] && is_valid_token_enc_key "$EXISTING_TOKEN_ENC_KEY"; then
+  TOKEN_ENC_KEY="$EXISTING_TOKEN_ENC_KEY"
+else
+  if [ -n "$EXISTING_TOKEN_ENC_KEY" ]; then
+    printf "  ${YELLOW}existing TOKEN_ENC_KEY is not valid base64(32 bytes); regenerating${RESET}\n"
+  fi
+  TOKEN_ENC_KEY="$(gen_base64 32)"
+fi
 
 # Default DB path sits next to .env if not already set.
 DEFAULT_DB="file:$(cd "$ENV_DIR" && cd .. && pwd)/data.db"
