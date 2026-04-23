@@ -9,6 +9,7 @@ import {
   useGmailFiltersQuery,
 } from '../components/GmailFiltersList.js';
 import { RuleCheckPanel } from '../components/RuleAnalyzer.js';
+import { InboxCleanupWizard } from '../components/InboxCleanupWizard.js';
 
 // ── types ─────────────────────────────────────────────────────────────────
 
@@ -31,6 +32,7 @@ export function Home() {
   const qc = useQueryClient();
   const [editing, setEditing] = useState<Rule | null>(null);
   const [creating, setCreating] = useState(false);
+  const [cleaningUp, setCleaningUp] = useState(false);
   const [tab, setTab] = useState<Tab>('ai-rules');
   const activeRun = useActiveRun();
 
@@ -90,9 +92,9 @@ export function Home() {
   return (
     <div className={`home ${activeRun.open ? 'home--log-open' : ''}`}>
       <section className="hero-actions hero-actions--two">
-        <button className="hero-btn" disabled>
+        <button className="hero-btn" onClick={() => setCleaningUp(true)}>
           <div className="hero-btn-title">Clean up my inbox</div>
-          <div className="hero-btn-sub">Coming soon</div>
+          <div className="hero-btn-sub">AI proposes a rule per email, you approve</div>
         </button>
         <a className="hero-btn" href="https://mail.google.com" target="_blank" rel="noreferrer">
           <div className="hero-btn-title">Open Gmail</div>
@@ -172,6 +174,7 @@ export function Home() {
 
       {creating && <RuleEditor mode="create" onClose={() => setCreating(false)} />}
       {editing && <RuleEditor mode="edit" rule={editing} onClose={() => setEditing(null)} />}
+      {cleaningUp && <InboxCleanupWizard onClose={() => setCleaningUp(false)} />}
 
       {activeRun.open && activeRun.runId && (
         <RunLogPanel

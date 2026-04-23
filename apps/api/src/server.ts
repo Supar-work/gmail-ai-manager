@@ -18,6 +18,7 @@ import { runsRouter } from './routes/runs.js';
 import { settingsRouter } from './routes/settings.js';
 import { modelsRouter } from './routes/models.js';
 import { gmailFiltersRouter } from './routes/gmail-filters.js';
+import { inboxCleanupRouter } from './routes/inbox-cleanup.js';
 import { startScheduler } from './jobs/scheduler.js';
 import { startPoller } from './gmail/poll.js';
 
@@ -57,6 +58,7 @@ app.use('/api/runs', runsRouter);
 app.use('/api/settings', settingsRouter);
 app.use('/api/models', modelsRouter);
 app.use('/api/gmail-filters', gmailFiltersRouter);
+app.use('/api/inbox-cleanup', inboxCleanupRouter);
 
 if (env.NODE_ENV === 'production') {
   const here = path.dirname(fileURLToPath(import.meta.url));
