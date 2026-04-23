@@ -23,6 +23,12 @@ import {
 } from '../claude/inbox-rule-propose.js';
 import { searchMatchesForRule } from '../gmail/inbox-rule-search.js';
 import { applyRuleToScope } from '../gmail/apply-rule-to-scope.js';
+import {
+  fetchLabelSamplesForQuery,
+  recommendFromSamples,
+  type LabelRecommendation,
+} from '../gmail/label-recommend.js';
+import { migrateLabel } from '../gmail/label-migrate.js';
 import { TtlCache } from '../util/ttl-cache.js';
 import { logger } from '../logger.js';
 
@@ -376,6 +382,134 @@ inboxCleanupRouter.post('/session/:id/preview-matches', async (req, res) => {
   }
 });
 
+// ── Label-recommendation for a single inbox-cleanup candidate ────────────
+//
+// Mirrors GET /api/gmail-filters/:id/label-recommendation but keyed on a
+// session+message rather than a filter mirror. Reuses the same
+// recommend-from-samples helper so the UX (canonical taxonomy,
+// confidence, reasoning, disposition) is identical across the two
+// wizards.
+
+const recommendCache = new TtlCache<LabelRecommendation>(TTL_12H);
+
+function labelRecKey(userId: string, messageId: string, historyId: string | null): string {
+  return `${userId}:lr:${messageId}:${historyId ?? 'nh'}`;
+}
+
+inboxCleanupRouter.get('/session/:id/message/:messageId/label-recommendation', async (req, res) => {
+  const userId = getUserId(req);
+  try {
+    getSession(req.params.id, userId);
+  } catch {
+    res.status(404).json({ error: 'session_not_found' });
+    return;
+  }
+
+  const row = await prisma.inboxMessage.findFirst({
+    where: { userId, gmailMessageId: req.params.messageId },
+  });
+  if (!row) {
+    res.status(404).json({ error: 'not_found' });
+    return;
+  }
+
+  const ck = labelRecKey(userId, row.gmailMessageId, row.historyId);
+  const cached = recommendCache.get(ck);
+  if (cached) {
+    res.json(cached);
+    return;
+  }
+
+  // Reuse the proposer's samples + its proposed label if available —
+  // they were sampled from the same Gmail query we'd search here, so
+  // there's no point re-querying. Falls back to a from-the-sender probe
+  // if no proposal has been fetched yet (e.g., user skipped ahead).
+  const proposalK = proposalKey(userId, row.gmailMessageId, row.historyId);
+  const cachedProposal = proposalCache.get(proposalK);
+
+  let samples: Awaited<ReturnType<typeof fetchLabelSamplesForQuery>> = [];
+  let currentLabel: string | null = null;
+  if (cachedProposal) {
+    samples = cachedProposal.samples.map((s) => ({
+      from: s.from,
+      subject: s.subject,
+      snippet: s.snippet,
+    }));
+    const addLabel = cachedProposal.actions.find((a) => a.type === 'addLabel');
+    if (addLabel && addLabel.type === 'addLabel') {
+      currentLabel = addLabel.labelName;
+    }
+  } else if (row.fromHeader) {
+    const senderAddress = extractEmailAddress(row.fromHeader) ?? row.fromHeader;
+    const q = `from:${JSON.stringify(senderAddress)}`;
+    try {
+      samples = await fetchLabelSamplesForQuery(userId, q);
+    } catch (err) {
+      logger.warn({ err, userId }, 'label-rec sample fetch failed');
+    }
+  }
+
+  try {
+    const rec = await recommendFromSamples(samples, { currentLabel });
+    recommendCache.set(ck, rec);
+    res.json(rec);
+  } catch (err) {
+    if (handleGmailError(err, userId, res)) return;
+    logger.error({ err, userId, messageId: row.gmailMessageId }, 'inbox label recommend failed');
+    res.status(500).json({
+      error: 'recommendation_failed',
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
+});
+
+// Migrate endpoint matches the shape the LabelRecommendation component
+// expects so the frontend stays source-agnostic. In the inbox-cleanup
+// context the proposed rule has not yet been applied, so we create the
+// Gmail label + move any messages currently carrying the old label —
+// exactly what `migrateLabel` does — and the client-side onApplied
+// callback takes care of rewriting the proposed NL + re-deriving
+// actions. If no Gmail messages currently carry oldLabelName, the
+// helper's moved count will be 0, which is fine.
+const MigrateBody = z.object({
+  newLabelPath: z.string().min(1).max(200),
+  oldLabelName: z.string().max(200).nullable().optional(),
+});
+
+inboxCleanupRouter.post('/session/:id/message/:messageId/migrate-label', async (req, res) => {
+  const userId = getUserId(req);
+  const parsed = MigrateBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'bad_body' });
+    return;
+  }
+  try {
+    getSession(req.params.id, userId);
+  } catch {
+    res.status(404).json({ error: 'session_not_found' });
+    return;
+  }
+  try {
+    const result = await migrateLabel(userId, {
+      newLabelPath: parsed.data.newLabelPath,
+      oldLabelName: parsed.data.oldLabelName ?? null,
+    });
+    res.json(result);
+  } catch (err) {
+    if (handleGmailError(err, userId, res)) return;
+    logger.error(
+      { err, userId, messageId: req.params.messageId },
+      'inbox-cleanup label migration failed',
+    );
+    res.status(500).json({
+      error: 'migrate_failed',
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
+});
+
+// ── Apply ────────────────────────────────────────────────────────────────
+
 /**
  * POST /session/:id/apply — create the Rule row and optionally apply
  * to inbox / all mail.
@@ -533,4 +667,12 @@ function safeLabels(labelIdsJson: string): string[] {
   } catch {
     return [];
   }
+}
+
+/** Pull the bare address out of a "Display Name <addr@host>" from header. */
+function extractEmailAddress(fromHeader: string): string | null {
+  const m = /<([^>]+)>/.exec(fromHeader);
+  if (m && m[1]) return m[1].trim();
+  const bare = fromHeader.trim();
+  return /@/.test(bare) ? bare : null;
 }

@@ -60,16 +60,61 @@ type MigrateResult = {
  * `onApplied` fires after a successful migration so the parent wizard can
  * rewrite the AI rule text to reference the new label path.
  */
-export function LabelRecommendation({
-  mirrorId,
-  onApplied,
-}: {
-  mirrorId: string;
+/**
+ * A label-recommendation source identifies where to fetch the
+ * recommendation from + where to post the migration. Both the Gmail-filter
+ * translate wizard and the inbox-cleanup wizard use this component;
+ * only the URLs differ.
+ */
+export type LabelRecommendationSource =
+  | { type: 'mirror'; mirrorId: string }
+  | { type: 'inbox-message'; sessionId: string; messageId: string };
+
+function endpointsFor(source: LabelRecommendationSource): {
+  fetch: string;
+  migrate: string;
+  cacheKey: (string | number)[];
+  resetKey: string;
+} {
+  if (source.type === 'mirror') {
+    return {
+      fetch: `/api/gmail-filters/${source.mirrorId}/label-recommendation`,
+      migrate: `/api/gmail-filters/${source.mirrorId}/migrate-label`,
+      cacheKey: ['label-recommendation', source.mirrorId],
+      resetKey: source.mirrorId,
+    };
+  }
+  return {
+    fetch: `/api/inbox-cleanup/session/${source.sessionId}/message/${source.messageId}/label-recommendation`,
+    migrate: `/api/inbox-cleanup/session/${source.sessionId}/message/${source.messageId}/migrate-label`,
+    cacheKey: ['label-recommendation', 'inbox', source.sessionId, source.messageId],
+    resetKey: `${source.sessionId}:${source.messageId}`,
+  };
+}
+
+/**
+ * Backward-compatible props: `mirrorId` is shorthand for
+ * `source={{ type: 'mirror', mirrorId }}`. New callers (inbox-cleanup
+ * wizard) pass `source` directly.
+ */
+type LabelRecommendationProps = {
   onApplied?: (info: { oldLabelName: string | null; newLabelPath: string }) => void;
-}) {
+} & (
+  | { mirrorId: string; source?: never }
+  | { source: LabelRecommendationSource; mirrorId?: never }
+);
+
+export function LabelRecommendation(props: LabelRecommendationProps) {
+  const { onApplied } = props;
+  const source: LabelRecommendationSource =
+    'source' in props && props.source
+      ? props.source
+      : { type: 'mirror', mirrorId: (props as { mirrorId: string }).mirrorId };
+  const { fetch: fetchUrl, migrate: migrateUrl, cacheKey, resetKey } = endpointsFor(source);
+
   const rec = useQuery<Recommendation>({
-    queryKey: ['label-recommendation', mirrorId],
-    queryFn: () => apiGet<Recommendation>(`/api/gmail-filters/${mirrorId}/label-recommendation`),
+    queryKey: cacheKey,
+    queryFn: () => apiGet<Recommendation>(fetchUrl),
     staleTime: 10 * 60 * 1000,
     retry: false,
   });
@@ -80,18 +125,18 @@ export function LabelRecommendation({
   const [migrateResult, setMigrateResult] = useState<MigrateResult | null>(null);
   const [migrateExisting, setMigrateExisting] = useState(true);
 
-  // Reset whenever we land on a different filter. Triggered on mirrorId so
-  // the user's typed edits don't leak between wizard pages.
+  // Reset whenever we land on a different source (new filter / new
+  // inbox email). `resetKey` is the component's identity key.
   useEffect(() => {
     setTopLevel('');
     setSubLevel('');
     setTopIsCustom(false);
     setMigrateResult(null);
     setMigrateExisting(true);
-  }, [mirrorId]);
+  }, [resetKey]);
 
   // Seed the inputs from the recommendation the first time it arrives for
-  // this filter (or when it changes because the cache invalidated).
+  // this source (or when it changes because the cache invalidated).
   useEffect(() => {
     if (!rec.data) return;
     const { top, sub } = splitPath(rec.data.labelPath);
@@ -99,10 +144,10 @@ export function LabelRecommendation({
     setSubLevel(sub);
     setTopIsCustom(top !== '' && !TOP_LEVELS.some((t) => t.name === top));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rec.data?.labelPath, mirrorId]);
+  }, [rec.data?.labelPath, resetKey]);
 
   const migrate = useMutation<MigrateResult, Error, { newLabelPath: string; oldLabelName: string | null }>({
-    mutationFn: (body) => apiSend<MigrateResult>('POST', `/api/gmail-filters/${mirrorId}/migrate-label`, body),
+    mutationFn: (body) => apiSend<MigrateResult>('POST', migrateUrl, body),
     onSuccess: (data, vars) => {
       setMigrateResult(data);
       onApplied?.({ oldLabelName: vars.oldLabelName, newLabelPath: vars.newLabelPath });

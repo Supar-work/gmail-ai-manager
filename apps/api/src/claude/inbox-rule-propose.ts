@@ -29,14 +29,55 @@ export type EmailForProposal = {
   date: string | null;
 };
 
-const ProposeResponseSchema = z.object({
-  naturalLanguage: z.string().min(1),
-  actions: z.array(ActionSchema).min(1),
-  gmailQuery: z.string().min(1),
-  groupDescription: z.string().min(1),
-  confidence: z.number().min(0).max(1),
-  reasoning: z.string().min(1),
-});
+/**
+ * Enforced at schema-validation time so runClaudeJson retries if Claude
+ * keeps slipping: every label an action applies or removes must appear
+ * LITERALLY in the naturalLanguage. Skips system labels and generated
+ * snooze/<iso> labels (which the user would never paraphrase).
+ *
+ * The error message deliberately names the missing label so that the
+ * improved retry nudge in runClaudeJson can pass it back to Claude.
+ */
+function refineLabelsAreNamedInNL(
+  data: { naturalLanguage: string; actions: Action[] },
+  ctx: z.RefinementCtx,
+): void {
+  const nl = data.naturalLanguage.toLowerCase();
+  for (const action of data.actions) {
+    if (action.type !== 'addLabel' && action.type !== 'removeLabel') continue;
+    const label = action.labelName;
+    // System / synthetic label names that don't need to appear in the NL —
+    // the user wouldn't expect to see "INBOX" or the generated ISO-bearing
+    // snooze label in a human-readable rule sentence.
+    if (
+      label === 'INBOX' ||
+      label === 'STARRED' ||
+      label === 'IMPORTANT' ||
+      label === 'UNREAD' ||
+      label.startsWith('snooze/')
+    ) {
+      continue;
+    }
+    if (!nl.includes(label.toLowerCase())) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `naturalLanguage must literally include the exact label path "${label}". Add it to the NL (e.g. "... as ${label} ...") — paraphrases like "LinkedIn notifications" are not accepted.`,
+        path: ['naturalLanguage'],
+      });
+    }
+  }
+}
+
+const ProposeResponseSchema = z
+  .object({
+    naturalLanguage: z.string().min(1),
+    actions: z.array(ActionSchema).min(1),
+    gmailQuery: z.string().min(1),
+    groupDescription: z.string().min(1),
+    confidence: z.number().min(0).max(1),
+    reasoning: z.string().min(1),
+  })
+  .superRefine(refineLabelsAreNamedInNL);
 export type ProposeResponse = z.infer<typeof ProposeResponseSchema>;
 
 const EvaluateResponseSchema = z.object({
@@ -548,11 +589,13 @@ Respond with ONE JSON object, no fences, no prose:
  * driving now, so we trust their text and only need a fresh translation
  * of it into actions + query.
  */
-const ReproposeResponseSchema = z.object({
-  naturalLanguage: z.string().min(1),
-  actions: z.array(ActionSchema).min(1),
-  gmailQuery: z.string().min(1),
-});
+const ReproposeResponseSchema = z
+  .object({
+    naturalLanguage: z.string().min(1),
+    actions: z.array(ActionSchema).min(1),
+    gmailQuery: z.string().min(1),
+  })
+  .superRefine(refineLabelsAreNamedInNL);
 export type ReproposeResponse = z.infer<typeof ReproposeResponseSchema>;
 
 export async function reproposeForEditedRule(args: {

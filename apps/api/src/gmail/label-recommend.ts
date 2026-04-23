@@ -37,27 +37,22 @@ const RecommendSchema = z.object({
 });
 
 /**
- * Pick the canonical label for a Gmail filter.
- *   1. Find the Gmail label the filter adds (if any).
- *   2. Pull up to 8 sample emails from that label (or the filter's criteria
- *      if no label is applied).
- *   3. Ask Claude to match the samples to a slug from the taxonomy and fill
- *      any <Placeholder> in the default label path with a specific brand /
- *      vendor inferred from the samples.
+ * Core recommend-a-canonical-label flow, parameterised by samples +
+ * current-label instead of a GmailFilter row. Used by both the
+ * GmailFilter-translate wizard (via `recommendCanonicalLabel`) and the
+ * inbox-cleanup wizard (via the `/api/inbox-cleanup/.../label-recommendation`
+ * route) so the UX + label taxonomy stays identical across both.
  */
-export async function recommendCanonicalLabel(
-  userId: string,
-  mirrorId: string,
+export async function recommendFromSamples(
+  samples: LabelSample[],
+  opts: {
+    currentLabel?: string | null;
+    /** Optional criteria context (e.g. filter criteria JSON) for the prompt. */
+    criteria?: Record<string, unknown>;
+  } = {},
 ): Promise<LabelRecommendation> {
-  const row = await prisma.gmailFilter.findFirst({ where: { id: mirrorId, userId } });
-  if (!row) throw new Error('not_found');
-
-  const criteria = safeJson<Record<string, unknown>>(row.criteriaJson, {});
-  const action = safeJson<{ addLabelIds?: string[] }>(row.actionJson, {});
-  const labelMap = safeJson<Record<string, string>>(row.labelMap, {});
-
-  const currentLabel = resolveCurrentLabel(action.addLabelIds, labelMap);
-  const samples = await fetchSamples(userId, currentLabel, criteria);
+  const currentLabel = opts.currentLabel ?? null;
+  const criteria = opts.criteria ?? {};
 
   const taxonomyText = CANONICAL_LABELS.map(
     (c) =>
@@ -94,6 +89,44 @@ export async function recommendCanonicalLabel(
   };
 }
 
+/**
+ * Pick the canonical label for a Gmail filter.
+ *   1. Find the Gmail label the filter adds (if any).
+ *   2. Pull up to 8 sample emails from that label (or the filter's criteria
+ *      if no label is applied).
+ *   3. Delegate to `recommendFromSamples` for prompting + taxonomy mapping.
+ */
+export async function recommendCanonicalLabel(
+  userId: string,
+  mirrorId: string,
+): Promise<LabelRecommendation> {
+  const row = await prisma.gmailFilter.findFirst({ where: { id: mirrorId, userId } });
+  if (!row) throw new Error('not_found');
+
+  const criteria = safeJson<Record<string, unknown>>(row.criteriaJson, {});
+  const action = safeJson<{ addLabelIds?: string[] }>(row.actionJson, {});
+  const labelMap = safeJson<Record<string, string>>(row.labelMap, {});
+
+  const currentLabel = resolveCurrentLabel(action.addLabelIds, labelMap);
+  const samples = await fetchSamples(userId, currentLabel, criteria);
+
+  return recommendFromSamples(samples, { currentLabel, criteria });
+}
+
+/**
+ * Fetch up to SAMPLE_LIMIT messages matching a Gmail `q:` query and
+ * reduce each to (from, subject, snippet). Exposed so the inbox-cleanup
+ * route can pull samples using the proposer's gmailQuery without needing
+ * access to a `GmailFilter` row.
+ */
+export async function fetchLabelSamplesForQuery(
+  userId: string,
+  gmailQuery: string,
+): Promise<LabelSample[]> {
+  if (!gmailQuery.trim()) return [];
+  return fetchSamplesByQuery(userId, gmailQuery);
+}
+
 function resolveCurrentLabel(
   addLabelIds: string[] | undefined,
   labelMap: Record<string, string>,
@@ -113,13 +146,21 @@ async function fetchSamples(
   currentLabel: string | null,
   criteria: Record<string, unknown>,
 ): Promise<LabelSample[]> {
-  const gmail = await gmailForUser(userId);
-
   const q = currentLabel
     ? `label:${JSON.stringify(currentLabel)}`
     : buildCriteriaQuery(criteria);
   if (!q) return [];
+  return fetchSamplesByQuery(userId, q);
+}
 
+/**
+ * Shared sample-fetcher: runs a Gmail search for `q` and returns up to
+ * SAMPLE_LIMIT compact metadata rows. Kept as its own function so both
+ * the filter-translate flow and the inbox-cleanup flow feed the same
+ * prompt context to the taxonomy-picker.
+ */
+async function fetchSamplesByQuery(userId: string, q: string): Promise<LabelSample[]> {
+  const gmail = await gmailForUser(userId);
   try {
     const listRes = await gmail.users.messages.list({
       userId: 'me',

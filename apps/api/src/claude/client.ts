@@ -150,8 +150,23 @@ export async function runClaudeJson<T>(
   for (let attempt = 0; attempt < 3; attempt++) {
     const nudged = attempt > 0 && lastErr instanceof ClaudeInvocationError
       && /schema_violation|no_json_in_response/.test(lastErr.message);
+    // On schema failures, surface the SPECIFIC zod message so Claude can
+    // actually fix it (e.g., "naturalLanguage must literally include
+    // 'Notifications/LinkedIn'") rather than seeing only a generic
+    // "respond with JSON" nudge. The issue text lives in
+    // lastErr.message after "schema_violation: ".
+    const specificIssue =
+      nudged && lastErr instanceof ClaudeInvocationError
+        ? lastErr.message
+            .replace(/^schema_violation:\s*/, '')
+            .replace(/^no_json_in_response:\s*/, '')
+            .split('\nresponse:')[0]
+            ?.trim()
+        : '';
     const p = nudged
-      ? `${prompt}\n\nIMPORTANT: Your previous response could not be parsed as JSON matching the required schema. Respond ONLY with a single valid JSON object, no code fences, no prose.`
+      ? `${prompt}\n\nIMPORTANT: Your previous response could not be parsed as JSON matching the required schema. Respond ONLY with a single valid JSON object, no code fences, no prose.${
+          specificIssue ? `\n\nSpecific issue to fix:\n${specificIssue.slice(0, 600)}` : ''
+        }`
       : prompt;
 
     let text: string;

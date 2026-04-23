@@ -11,6 +11,7 @@ import type {
 } from '@gam/shared';
 import { apiGet, apiSend, ApiError } from '../lib/api.js';
 import { RuleCheckPanel } from './RuleAnalyzer.js';
+import { LabelRecommendation } from './LabelRecommendation.js';
 import { describeAction, describeRunAt } from '../lib/action-format.js';
 
 /**
@@ -58,6 +59,10 @@ export function InboxCleanupWizard({ onClose }: { onClose: () => void }) {
   const [failures, setFailures] = useState<Record<string, string>>({});
   const [finishedSummary, setFinishedSummary] = useState<FinalSummary | null>(null);
   const [startBusy, setStartBusy] = useState(true);
+  // messageId currently being AI-rewritten after a label-recommendation
+  // apply. Used to show a spinner in the proposal body while Claude
+  // re-phrases the NL against the new label path.
+  const [rewritingId, setRewritingId] = useState<string | null>(null);
 
   // ── Start session ───────────────────────────────────────────────────
   const startedRef = useRef(false);
@@ -380,12 +385,46 @@ export function InboxCleanupWizard({ onClose }: { onClose: () => void }) {
             next wizard open.
           </div>
         )}
-        {currentProposal && (
+        {currentProposal && session && currentId && (
           <ProposalBody
             proposal={currentProposal}
             editText={currentEditText}
-            onEditChange={(v) => setEdits((prev) => ({ ...prev, [currentId!]: v }))}
-            updating={Boolean(currentId && previewUpdating[currentId])}
+            onEditChange={(v) => setEdits((prev) => ({ ...prev, [currentId]: v }))}
+            updating={Boolean(previewUpdating[currentId])}
+            rewriting={rewritingId === currentId}
+            sessionId={session.sessionId}
+            messageId={currentId}
+            onLabelApplied={async ({ oldLabelName, newLabelPath }) => {
+              // Label-recommend flow mirrors TranslateWizard: once the user
+              // commits a canonical-label migration, we ask Claude to
+              // rewrite the rule text against the new label path. The
+              // edit-debounced preview-matches then re-derives actions +
+              // query so the action chips + Gmail search stay in sync.
+              const baseText = edits[currentId] ?? currentProposal.naturalLanguage;
+              if (!baseText.trim()) return;
+              setRewritingId(currentId);
+              try {
+                const res = await apiSend<{ naturalLanguage: string }>(
+                  'POST',
+                  '/api/rules/rewrite-with-label',
+                  {
+                    naturalLanguage: baseText,
+                    oldLabelName,
+                    newLabelPath,
+                  },
+                );
+                const rewritten = (res.naturalLanguage ?? '').trim();
+                if (rewritten) {
+                  setEdits((prev) => ({ ...prev, [currentId]: rewritten }));
+                }
+              } catch {
+                // Silent: the migration itself succeeded; the user can
+                // always manually edit the textarea. Rewrite is a nice-to-
+                // have, not a blocker.
+              } finally {
+                setRewritingId(null);
+              }
+            }}
           />
         )}
 
@@ -440,11 +479,19 @@ function ProposalBody({
   editText,
   onEditChange,
   updating,
+  rewriting,
+  sessionId,
+  messageId,
+  onLabelApplied,
 }: {
   proposal: CleanupProposal;
   editText: string;
   onEditChange: (v: string) => void;
   updating: boolean;
+  rewriting: boolean;
+  sessionId: string;
+  messageId: string;
+  onLabelApplied: (info: { oldLabelName: string | null; newLabelPath: string }) => void;
 }) {
   const actionChips = useMemo(() => describeActions(proposal.actions), [proposal.actions]);
 
@@ -510,6 +557,28 @@ function ProposalBody({
           action chips are suppressed (hideActions) so we don't show two
           disagreeing action lists on the same page. */}
       <RuleCheckPanel nl={editText} onAcceptRewrite={(s) => onEditChange(s)} hideActions />
+
+      {/* Canonical-label suggestion panel — identical component + UX to
+          the Gmail-filter translate wizard. The `source` discriminator
+          points the backend fetch at the inbox-cleanup endpoint. When
+          the user commits a label migration, onLabelApplied rewrites
+          the proposal's NL via Claude; the edit-debounced
+          preview-matches then re-derives actions + query so the action
+          chips stay consistent with the new label. */}
+      <LabelRecommendation
+        source={{ type: 'inbox-message', sessionId, messageId }}
+        onApplied={onLabelApplied}
+      />
+
+      {rewriting && (
+        <div
+          className="muted"
+          style={{ fontSize: '0.78rem', marginTop: '0.3rem', marginBottom: '0.3rem' }}
+        >
+          <span className="spinner" style={{ display: 'inline-block', verticalAlign: 'middle' }} />
+          <span style={{ marginLeft: '0.35rem' }}>Rewriting rule against the new label…</span>
+        </div>
+      )}
 
       <div
         className="muted"
