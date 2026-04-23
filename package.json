@@ -12,7 +12,7 @@
     "dev:web": "pnpm --filter @gam/web run dev",
     "dev:desktop": "pnpm --filter @gam/desktop run dev",
     "build": "pnpm -r run build",
-    "build:webapi": "pnpm --filter @gam/api run build && pnpm --filter @gam/web run build",
+    "build:webapi": "pnpm --filter @gam/shared run build && pnpm --filter @gam/api run build && pnpm --filter @gam/web run build",
     "build:desktop": "pnpm --filter @gam/desktop run build",
     "lint": "pnpm -r run lint",
     "typecheck": "pnpm -r run typecheck",
