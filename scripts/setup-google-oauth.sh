@@ -170,7 +170,23 @@ open_url "https://console.cloud.google.com/auth/clients"
 pause
 
 # ── Step 5: paste credentials ────────────────────────────────────────────
-printf "\n${BOLD}Step 5 — Paste the credentials below${RESET}\n\n"
+printf "\n${BOLD}Step 5 — Paste the credentials below${RESET}\n"
+cat <<'EOF'
+
+  From the dialog that appeared after clicking CREATE in Step 4, copy
+  the two values and paste them here one at a time:
+
+    • Client ID      — long string ending in ".apps.googleusercontent.com"
+                       (e.g. 123456789-abc…xyz.apps.googleusercontent.com)
+    • Client secret  — shorter opaque string starting with "GOCSPX-"
+                       (e.g. GOCSPX-aBc1234…)
+
+  If you closed the dialog, reopen it from
+  https://console.cloud.google.com/auth/clients → click your "Gmail AI
+  Manager CLI" client → the values are on that page (secret under
+  "Additional information", click the copy icon).
+
+EOF
 
 if [ -n "$EXISTING_CLIENT_ID" ]; then
   printf "  current GOOGLE_CLIENT_ID:     %s\n" "$(mask "$EXISTING_CLIENT_ID")"
