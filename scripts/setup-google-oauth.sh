@@ -146,9 +146,10 @@ cat <<'EOF'
     • Agree to the Google user data policy, click CREATE.
 
   Then in the LEFT SIDEBAR (under "Google Auth Platform") click the
-  "Audience" tab. Scroll to "Test users", click + ADD USERS, and add
-  the Gmail address you want the app to manage. Only accounts listed
-  here can sign in while the app is in testing mode.
+  "Audience" tab. Scroll to the "Test users" section and click its
+  "+ Add users" button — paste the Gmail address you want the app to
+  manage. Only accounts listed here can sign in while the app is in
+  testing mode.
 EOF
 open_url "https://console.cloud.google.com/auth/branding"
 pause
