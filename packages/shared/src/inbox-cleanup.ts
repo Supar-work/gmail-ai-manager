@@ -56,10 +56,14 @@ export type CleanupProposal = z.infer<typeof CleanupProposalSchema>;
 /**
  * Result of `POST /api/inbox-cleanup/session/:id/preview-matches` — a
  * lighter response for the debounced re-search when the user edits the
- * rule text. No refine history (the user is driving now).
+ * rule text. Includes freshly-rederived actions so the wizard's action
+ * chips stay in sync with the edited NL (no refine loop; the user is
+ * driving now).
  */
 export const CleanupPreviewSchema = z.object({
+  naturalLanguage: z.string(),
   gmailQuery: z.string(),
+  actions: z.array(ActionSchema),
   samples: z.array(CleanupSampleSchema),
   totals: MatchTotalsSchema,
 });

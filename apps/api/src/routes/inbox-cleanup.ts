@@ -18,7 +18,7 @@ import { syncInbox } from '../gmail/sync.js';
 import { GoogleTokenError, isInvalidGrant, markNeedsReauth } from '../gmail/client.js';
 import {
   proposeAndRefine,
-  proposeQueryFromRule,
+  reproposeForEditedRule,
   type EmailForProposal,
 } from '../claude/inbox-rule-propose.js';
 import { searchMatchesForRule } from '../gmail/inbox-rule-search.js';
@@ -74,7 +74,6 @@ function getSession(sessionId: string, userId: string): SessionState {
 const TTL_12H = 12 * 60 * 60 * 1000;
 const proposalCache = new TtlCache<CleanupProposal>(TTL_12H);
 const previewCache = new TtlCache<CleanupPreview>(TTL_12H);
-const queryFromRuleCache = new TtlCache<string>(TTL_12H);
 
 function proposalKey(userId: string, messageId: string, historyId: string | null): string {
   return `${userId}:${messageId}:${historyId ?? 'nh'}`;
@@ -82,10 +81,6 @@ function proposalKey(userId: string, messageId: string, historyId: string | null
 
 function ruleHash(naturalLanguage: string): string {
   return createHash('sha256').update(naturalLanguage).digest('hex').slice(0, 16);
-}
-
-function queryHash(gmailQuery: string): string {
-  return createHash('sha256').update(gmailQuery).digest('hex').slice(0, 16);
 }
 
 // ── Error helper (mirrors pattern in other routers) ────────────────────────
@@ -268,10 +263,12 @@ inboxCleanupRouter.post('/session/:id/propose', async (req, res) => {
 
     CleanupProposalSchema.parse(proposal); // runtime sanity check
     proposalCache.set(cacheK, proposal);
-    // Also seed the preview cache under the initial query so edits that
-    // revert to the original don't re-hit Gmail.
-    previewCache.set(`${userId}:${queryHash(proposal.gmailQuery)}`, {
+    // Also seed the preview cache under the initial rule text so edits
+    // that revert to the original don't re-hit Claude.
+    previewCache.set(`${userId}:${row.gmailMessageId}:${ruleHash(proposal.naturalLanguage)}`, {
+      naturalLanguage: proposal.naturalLanguage,
       gmailQuery: proposal.gmailQuery,
+      actions: proposal.actions,
       samples: proposal.samples,
       totals: proposal.totals,
     });
@@ -289,11 +286,14 @@ inboxCleanupRouter.post('/session/:id/propose', async (req, res) => {
 
 /**
  * POST /session/:id/preview-matches — debounced re-search after the
- * user edits the natural-language rule. Derives a fresh Gmail query
- * from the edited text (cached per text hash) then fetches samples.
+ * user edits the natural-language rule. Derives a fresh action list +
+ * Gmail query from the edited text (with the source email as context)
+ * so the wizard's action chips stay in sync with what the rule actually
+ * says, not just the match count.
  */
 const PreviewBody = z.object({
   naturalLanguage: z.string().min(1),
+  messageId: z.string(),
   limit: z.number().int().min(1).max(25).optional(),
 });
 
@@ -311,33 +311,61 @@ inboxCleanupRouter.post('/session/:id/preview-matches', async (req, res) => {
     return;
   }
 
+  const row = await prisma.inboxMessage.findFirst({
+    where: { userId, gmailMessageId: parsed.data.messageId },
+  });
+  if (!row) {
+    res.status(404).json({ error: 'message_not_found' });
+    return;
+  }
+
+  // Composite cache key: repropose output varies per (message, ruleText)
+  // because the email context can tip Claude toward different actions
+  // for the same rule wording.
+  const cacheKey = `${userId}:${row.gmailMessageId}:${ruleHash(parsed.data.naturalLanguage)}`;
+  const cached = previewCache.get(cacheKey);
+  if (cached) {
+    res.json(cached);
+    return;
+  }
+
   const user = await prisma.user.findUnique({ where: { id: userId } });
+
   try {
-    // 1. Cache the NL → query derivation so repeated preview calls during
-    //    the same edit session are cheap.
-    const ruleKey = `${userId}:${ruleHash(parsed.data.naturalLanguage)}`;
-    let gmailQuery = queryFromRuleCache.get(ruleKey);
-    if (!gmailQuery) {
-      gmailQuery = await proposeQueryFromRule({
-        naturalLanguage: parsed.data.naturalLanguage,
-        model: user?.claudeModel ?? undefined,
-      });
-      queryFromRuleCache.set(ruleKey, gmailQuery);
-    }
+    const email: EmailForProposal = {
+      messageId: row.gmailMessageId,
+      from: row.fromHeader,
+      to: row.toHeader,
+      subject: row.subject,
+      snippet: row.snippet,
+      body: row.bodyText,
+      labels: safeLabels(row.labelIds),
+      date: row.dateHeader,
+    };
 
-    // 2. Cache the Gmail search itself by query hash.
-    const searchKey = `${userId}:${queryHash(gmailQuery)}`;
-    let hit = previewCache.get(searchKey);
-    if (!hit) {
-      const search = await searchMatchesForRule(userId, gmailQuery, {
-        maxSamples: parsed.data.limit ?? 10,
-      });
-      hit = { gmailQuery, ...search };
-      previewCache.set(searchKey, hit);
-    }
+    const reproposed = await reproposeForEditedRule({
+      email,
+      editedNaturalLanguage: parsed.data.naturalLanguage,
+      nowIso: new Date().toISOString(),
+      timezone: user?.timezone ?? 'UTC',
+      model: user?.claudeModel ?? undefined,
+    });
 
-    CleanupPreviewSchema.parse(hit);
-    res.json(hit);
+    const search = await searchMatchesForRule(userId, reproposed.gmailQuery, {
+      maxSamples: parsed.data.limit ?? 10,
+    });
+
+    const preview: CleanupPreview = {
+      naturalLanguage: reproposed.naturalLanguage,
+      gmailQuery: reproposed.gmailQuery,
+      actions: reproposed.actions,
+      samples: search.samples,
+      totals: search.totals,
+    };
+
+    CleanupPreviewSchema.parse(preview);
+    previewCache.set(cacheKey, preview);
+    res.json(preview);
   } catch (err) {
     if (handleGmailError(err, userId, res)) return;
     logger.error({ err, userId }, 'preview-matches failed');

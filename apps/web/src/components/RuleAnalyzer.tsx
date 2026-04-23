@@ -37,6 +37,7 @@ export function RuleCheckPanel({
   nl,
   onAcceptRewrite,
   placement = 'block',
+  hideActions = false,
 }: {
   nl: string;
   /** Called when the user clicks "Use this" on a suggested rephrase. */
@@ -49,6 +50,13 @@ export function RuleCheckPanel({
    * tighter layout without forking the component.
    */
   placement?: 'block' | 'inline';
+  /**
+   * Suppress the "What it will do" summary + action chips. Hosts that
+   * already render a canonical action list (like the inbox-cleanup
+   * wizard) use this to avoid showing a second, potentially conflicting
+   * interpretation. Warnings + suggested rewrite still render.
+   */
+  hideActions?: boolean;
 }): JSX.Element {
   const [checked, setChecked] = useState<string | null>(null);
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
@@ -119,7 +127,7 @@ export function RuleCheckPanel({
               Preview failed: {(analyze.error as Error).message}
             </div>
           )}
-          {analyze.data && <RulePreview data={analyze.data} />}
+          {analyze.data && <RulePreview data={analyze.data} hideActions={hideActions} />}
         </>
       )}
     </div>
@@ -128,14 +136,22 @@ export function RuleCheckPanel({
 
 // ── sub-components ────────────────────────────────────────────────────────
 
-function RulePreview({ data }: { data: AnalyzeResponse }) {
+function RulePreview({
+  data,
+  hideActions,
+}: {
+  data: AnalyzeResponse;
+  hideActions?: boolean;
+}) {
   return (
     <div className="rule-preview">
-      <div className="rule-preview-row">
-        <span className="rule-preview-label">What it will do</span>
-        <span className="rule-preview-summary">{data.summary}</span>
-      </div>
-      {data.actions.length > 0 && (
+      {!hideActions && (
+        <div className="rule-preview-row">
+          <span className="rule-preview-label">What it will do</span>
+          <span className="rule-preview-summary">{data.summary}</span>
+        </div>
+      )}
+      {!hideActions && data.actions.length > 0 && (
         <div className="rule-preview-row">
           <span className="rule-preview-label">Actions</span>
           <div className="row wrap" style={{ gap: '0.3rem' }}>

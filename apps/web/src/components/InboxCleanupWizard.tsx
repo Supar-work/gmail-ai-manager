@@ -148,15 +148,20 @@ export function InboxCleanupWizard({ onClose }: { onClose: () => void }) {
       void apiSend<CleanupPreview>(
         'POST',
         `/api/inbox-cleanup/session/${session.sessionId}/preview-matches`,
-        { naturalLanguage: draft },
+        { naturalLanguage: draft, messageId: mid },
       )
         .then((res) => {
           setProposals((prev) => ({
             ...prev,
             [mid]: {
               ...(prev[mid] as CleanupProposal),
+              // Keep the user's exact text (don't jump underneath their cursor).
               naturalLanguage: draft,
               gmailQuery: res.gmailQuery,
+              // Crucial: actions now reflect the edited NL. Prevents the
+              // "NL says archive but action list doesn't include archive"
+              // desync that existed with the v1 preview-matches.
+              actions: res.actions,
               samples: res.samples,
               totals: res.totals,
             },
@@ -490,7 +495,14 @@ function ProposalBody({
         Gmail query: {proposal.gmailQuery}
       </div>
 
-      <RuleCheckPanel nl={editText} onAcceptRewrite={(s) => onEditChange(s)} />
+      {/*
+        hideActions=true: the proposer already produced a canonical
+        action list above. Showing the analyzer's re-derived action list
+        (which comes from a different prompt with no email context) was
+        causing confusing "two conflicting action sets on one page"
+        situations. Warnings + suggestedRewrite still render.
+      */}
+      <RuleCheckPanel nl={editText} onAcceptRewrite={(s) => onEditChange(s)} hideActions />
 
       <div
         className="muted"
