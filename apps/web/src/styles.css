@@ -217,6 +217,48 @@ button.danger {
   color: var(--warn);
 }
 
+/* Inline-editable action chip (inbox-cleanup wizard).
+   Looks like a .chip but is a real <button> and lights up on hover so
+   users know it's interactive. Expands a small popover below it with
+   action-specific editors (label dropdown / archive timing). */
+.action-chip-root {
+  position: relative;
+  display: inline-block;
+  margin: 0 0.2rem 0.2rem 0;
+}
+.chip.chip-editable {
+  cursor: pointer;
+  background: transparent;
+  /* Reset button UA styles to look like a chip */
+  font: inherit;
+  line-height: 1.2;
+  margin: 0;
+}
+.chip.chip-editable:hover {
+  background: color-mix(in srgb, currentColor 8%, transparent);
+}
+.chip-caret {
+  margin-left: 0.25rem;
+  font-size: 0.65rem;
+  opacity: 0.6;
+}
+.chip-editor {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 50;
+  min-width: 280px;
+  background: var(--panel, var(--card-bg, #ffffff));
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.55rem 0.7rem;
+  box-shadow: 0 10px 30px -12px rgba(0, 0, 0, 0.25);
+}
+.chip-editor-body .row {
+  flex-wrap: wrap;
+}
+
 .stack {
   display: flex;
   flex-direction: column;

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import type {
   Action,
@@ -11,8 +11,7 @@ import type {
 } from '@gam/shared';
 import { apiGet, apiSend, ApiError } from '../lib/api.js';
 import { RuleCheckPanel } from './RuleAnalyzer.js';
-import { LabelRecommendation } from './LabelRecommendation.js';
-import { describeAction, describeRunAt } from '../lib/action-format.js';
+import { EditableActionChip } from './EditableActionChip.js';
 
 /**
  * Wizard that walks the user through their inbox, proposing one AI rule
@@ -59,10 +58,6 @@ export function InboxCleanupWizard({ onClose }: { onClose: () => void }) {
   const [failures, setFailures] = useState<Record<string, string>>({});
   const [finishedSummary, setFinishedSummary] = useState<FinalSummary | null>(null);
   const [startBusy, setStartBusy] = useState(true);
-  // messageId currently being AI-rewritten after a label-recommendation
-  // apply. Used to show a spinner in the proposal body while Claude
-  // re-phrases the NL against the new label path.
-  const [rewritingId, setRewritingId] = useState<string | null>(null);
 
   // ── Start session ───────────────────────────────────────────────────
   const startedRef = useRef(false);
@@ -391,39 +386,28 @@ export function InboxCleanupWizard({ onClose }: { onClose: () => void }) {
             editText={currentEditText}
             onEditChange={(v) => setEdits((prev) => ({ ...prev, [currentId]: v }))}
             updating={Boolean(previewUpdating[currentId])}
-            rewriting={rewritingId === currentId}
-            sessionId={session.sessionId}
-            messageId={currentId}
-            onLabelApplied={async ({ oldLabelName, newLabelPath }) => {
-              // Label-recommend flow mirrors TranslateWizard: once the user
-              // commits a canonical-label migration, we ask Claude to
-              // rewrite the rule text against the new label path. The
-              // edit-debounced preview-matches then re-derives actions +
-              // query so the action chips + Gmail search stay in sync.
-              const baseText = edits[currentId] ?? currentProposal.naturalLanguage;
-              if (!baseText.trim()) return;
-              setRewritingId(currentId);
-              try {
-                const res = await apiSend<{ naturalLanguage: string }>(
-                  'POST',
-                  '/api/rules/rewrite-with-label',
-                  {
-                    naturalLanguage: baseText,
-                    oldLabelName,
-                    newLabelPath,
-                  },
-                );
-                const rewritten = (res.naturalLanguage ?? '').trim();
-                if (rewritten) {
-                  setEdits((prev) => ({ ...prev, [currentId]: rewritten }));
-                }
-              } catch {
-                // Silent: the migration itself succeeded; the user can
-                // always manually edit the textarea. Rewrite is a nice-to-
-                // have, not a blocker.
-              } finally {
-                setRewritingId(null);
-              }
+            onActionsChange={(newActions) => {
+              setProposals((prev) => ({
+                ...prev,
+                [currentId]: {
+                  ...(prev[currentId] as CleanupProposal),
+                  actions: newActions,
+                },
+              }));
+            }}
+            onLabelRename={(oldLabel, newLabel) => {
+              // A chip edit changed the label path. Update the NL text to
+              // use the new path too — the server's reproposer will
+              // re-derive the full action list from the edited NL on the
+              // next debounced preview-matches tick. Plain substring
+              // replace is adequate for a name like "Marketing/LEGO" →
+              // "Notifications/LEGO"; the prompt tolerates minor tidying.
+              const current = edits[currentId] ?? currentProposal.naturalLanguage;
+              if (!current.includes(oldLabel)) return;
+              setEdits((prev) => ({
+                ...prev,
+                [currentId]: current.split(oldLabel).join(newLabel),
+              }));
             }}
           />
         )}
@@ -479,28 +463,29 @@ function ProposalBody({
   editText,
   onEditChange,
   updating,
-  rewriting,
-  sessionId,
-  messageId,
-  onLabelApplied,
+  onActionsChange,
+  onLabelRename,
 }: {
   proposal: CleanupProposal;
   editText: string;
   onEditChange: (v: string) => void;
   updating: boolean;
-  rewriting: boolean;
-  sessionId: string;
-  messageId: string;
-  onLabelApplied: (info: { oldLabelName: string | null; newLabelPath: string }) => void;
+  /** Called when the user edits an action chip. Parent updates the
+   *  actions array immediately; the debounced reproposer will also fire
+   *  on the follow-on NL edit and produce a consistent list. */
+  onActionsChange: (next: Action[]) => void;
+  /** Called when a label chip changed its labelName. Parent rewrites
+   *  the NL to use the new path so the action list and the NL stay
+   *  aligned (and so the schema-level refineLabelsAreNamedInNL on the
+   *  next repropose doesn't reject the draft). */
+  onLabelRename: (oldLabel: string, newLabel: string) => void;
 }) {
-  const actionChips = useMemo(() => describeActions(proposal.actions), [proposal.actions]);
-
   // Layout mirrors RuleEditor (apps/web/src/pages/Home.tsx): label →
   // textarea → description → preview → check-rule. The differences from
   // a blank RuleEditor are (1) the textarea is seeded from the
-  // server-side propose loop, (2) actions render live (from the propose
-  // / repropose response) rather than waiting for a Check-rule click,
-  // and (3) the Matches block is specific to cleanup.
+  // server-side propose loop, (2) actions render live and editable
+  // (from the propose/repropose response) rather than waiting for a
+  // Check-rule click, and (3) the Matches block is specific to cleanup.
   return (
     <>
       <label
@@ -534,15 +519,24 @@ function ProposalBody({
 
       {/* Live "what it will do" — same .rule-preview styling as RuleEditor's
           analyze output, but driven by the propose/repropose response so the
-          chips match the rule that will actually run. */}
+          chips match the rule that will actually run. Each chip is an
+          inline editor: click the label chip to change the canonical
+          category, click the archive chip to change timing. */}
       <div className="rule-preview" style={{ marginBottom: '0.5rem' }}>
         <div className="rule-preview-row">
           <span className="rule-preview-label">Actions</span>
-          <div className="row wrap" style={{ gap: '0.3rem' }}>
-            {actionChips.map((c, i) => (
-              <span key={i} className={`chip ${c.kind}`}>
-                {c.label}
-              </span>
+          <div className="row wrap" style={{ gap: '0.3rem', alignItems: 'center' }}>
+            {proposal.actions.map((a, i) => (
+              <EditableActionChip
+                key={`${i}-${chipKey(a)}`}
+                action={a}
+                onChange={(next) => {
+                  const copy = proposal.actions.slice();
+                  copy[i] = next;
+                  onActionsChange(copy);
+                }}
+                onLabelRename={onLabelRename}
+              />
             ))}
             {updating && (
               <span className="muted" style={{ fontSize: '0.78rem' }}>
@@ -557,28 +551,6 @@ function ProposalBody({
           action chips are suppressed (hideActions) so we don't show two
           disagreeing action lists on the same page. */}
       <RuleCheckPanel nl={editText} onAcceptRewrite={(s) => onEditChange(s)} hideActions />
-
-      {/* Canonical-label suggestion panel — identical component + UX to
-          the Gmail-filter translate wizard. The `source` discriminator
-          points the backend fetch at the inbox-cleanup endpoint. When
-          the user commits a label migration, onLabelApplied rewrites
-          the proposal's NL via Claude; the edit-debounced
-          preview-matches then re-derives actions + query so the action
-          chips stay consistent with the new label. */}
-      <LabelRecommendation
-        source={{ type: 'inbox-message', sessionId, messageId }}
-        onApplied={onLabelApplied}
-      />
-
-      {rewriting && (
-        <div
-          className="muted"
-          style={{ fontSize: '0.78rem', marginTop: '0.3rem', marginBottom: '0.3rem' }}
-        >
-          <span className="spinner" style={{ display: 'inline-block', verticalAlign: 'middle' }} />
-          <span style={{ marginLeft: '0.35rem' }}>Rewriting rule against the new label…</span>
-        </div>
-      )}
 
       <div
         className="muted"
@@ -700,18 +672,15 @@ function DoneScreen({
   );
 }
 
-// ── Action chip formatting ─────────────────────────────────────────────────
+// ── helpers ─────────────────────────────────────────────────────────────
 
-function describeActions(actions: Action[]): Array<{ label: string; kind: 'accent' | 'warn' | 'danger' }> {
-  return actions.map((a) => {
-    const at = describeRunAt(a);
-    const label = at ? `${describeAction(a)} — ${at}` : describeAction(a);
-    const kind: 'accent' | 'warn' | 'danger' =
-      a.type === 'archive' || a.type === 'removeLabel'
-        ? 'warn'
-        : a.type === 'trash'
-          ? 'danger'
-          : 'accent';
-    return { label, kind };
-  });
+/** Stable-ish React key for an action so remounts don't nuke the chip's
+ *  internal "editing" state every time the parent re-renders. Includes
+ *  the labelName / to field because those are what the user's editing
+ *  in-place; timing changes keep the same key so the chip doesn't
+ *  flicker when the user picks an option. */
+function chipKey(a: Action): string {
+  if (a.type === 'addLabel' || a.type === 'removeLabel') return `${a.type}:${a.labelName}`;
+  if (a.type === 'forward') return `forward:${a.to}`;
+  return a.type;
 }
