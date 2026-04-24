@@ -290,6 +290,18 @@ function buildProposePrompt(args: {
   email: EmailForProposal;
   nowIso: string;
   timezone: string;
+  /**
+   * When the caller has already run the canonical-label recommender
+   * against sample emails, pass its verdict here so the proposer uses
+   * the exact same label path. Prevents the proposer and recommender
+   * from disagreeing (one picking "Shopping/LEGO" while the other
+   * picks "Marketing/LEGO" based on different signals).
+   */
+  preferredLabel?: {
+    path: string;
+    disposition: 'inbox' | 'archive';
+    reasoning: string;
+  };
   previousAttempt?: {
     rule: string;
     gmailQuery: string;
@@ -297,7 +309,7 @@ function buildProposePrompt(args: {
     sampleSummary: string;
   };
 }): string {
-  const { email, nowIso, timezone, previousAttempt } = args;
+  const { email, nowIso, timezone, previousAttempt, preferredLabel } = args;
 
   const emailBlock = JSON.stringify(
     {
@@ -327,6 +339,25 @@ return a more specific rule that at least matches this one email correctly.
 `
     : '';
 
+  const preferredLabelBlock = preferredLabel
+    ? `
+═══════════════════════════════════════════════════════════════════════
+PRE-COMPUTED CANONICAL LABEL (authoritative):
+A separate taxonomy classifier already looked at sample emails matching
+this sender and picked:
+  Label path: ${preferredLabel.path}
+  Disposition: ${preferredLabel.disposition}
+  Reasoning:  ${preferredLabel.reasoning}
+
+If your rule includes an addLabel action for this class of email, USE
+this exact label path verbatim (do NOT paraphrase, shorten, or pick a
+different top-level). Mention the same label path in naturalLanguage.
+Only deviate if this email is so different from the sampled siblings
+that the recommended label clearly doesn't fit.
+═══════════════════════════════════════════════════════════════════════
+`
+    : '';
+
   return `You are drafting an AI rule for an email-automation product that is
 helping the user clean up their Gmail inbox one email at a time. For this
 single inbox email, produce:
@@ -343,10 +374,14 @@ Before emitting actions:
   (b) Decide on the predicate that generalizes this email — see the
       SPECIFICITY RULE below. Prefer sender / domain over body content
       for human replies.
+  (c) If a pre-computed canonical label is provided below, use that
+      label path verbatim in any addLabel actions and in the NL. The
+      downstream Suggested-label UI panel uses the SAME classifier
+      output, so deviating will create a visible disagreement.
 
 Current time (UTC): ${nowIso}
 User timezone:      ${timezone}
-
+${preferredLabelBlock}
 ${COMMON_ACTION_GUIDANCE}
 ${refineBlock}
 THE EMAIL:
@@ -434,6 +469,17 @@ export type ProposeAndRefineArgs = {
     samples: CleanupSample[];
     totals: { inbox: number; allMail: number };
   }>;
+  /**
+   * Canonical-label recommendation pre-computed from sample emails.
+   * Keeps the proposer's addLabel action aligned with the Suggested-
+   * label UI panel (which uses the same classifier). Optional — caller
+   * skips it if no recommendation could be produced (e.g. no sender).
+   */
+  preferredLabel?: {
+    path: string;
+    disposition: 'inbox' | 'archive';
+    reasoning: string;
+  };
   model?: string;
 };
 
@@ -476,6 +522,7 @@ export async function proposeAndRefine(
       nowIso,
       timezone,
       previousAttempt,
+      preferredLabel: args.preferredLabel,
     });
     current = await runClaudeJson(proposePrompt, ProposeResponseSchema, {
       model,

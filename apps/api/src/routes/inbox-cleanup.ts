@@ -246,12 +246,49 @@ inboxCleanupRouter.post('/session/:id/propose', async (req, res) => {
   const timezone = user?.timezone ?? 'UTC';
 
   try {
+    // Pre-compute the canonical-label recommendation from sender samples
+    // BEFORE the propose loop runs. This is the same classifier the
+    // Suggested-label UI panel uses, so handing its verdict to the
+    // propose prompt guarantees the two systems can't disagree on the
+    // label path. Failures here are non-fatal — proceed without a
+    // preferred label if the recommender can't run.
+    let preferredLabel: Parameters<typeof proposeAndRefine>[0]['preferredLabel'];
+    try {
+      const senderAddress =
+        row.fromHeader != null ? extractEmailAddress(row.fromHeader) : null;
+      if (senderAddress) {
+        const seedSamples = await fetchLabelSamplesForQuery(
+          userId,
+          `from:${JSON.stringify(senderAddress)}`,
+        );
+        if (seedSamples.length > 0) {
+          const rec = await recommendFromSamples(seedSamples, { currentLabel: null });
+          // Skip the "skip" slug (taxonomy's explicit "no label applies"
+          // bucket) — we want the proposer to free-form its own label in
+          // that case rather than be told not to label.
+          if (rec.slug !== 'skip' && rec.labelPath) {
+            preferredLabel = {
+              path: rec.labelPath,
+              disposition: rec.disposition,
+              reasoning: rec.reasoning,
+            };
+            // Seed the recommendCache too so the subsequent GET /label-
+            // recommendation for this same message is instant.
+            recommendCache.set(labelRecKey(userId, row.gmailMessageId, row.historyId), rec);
+          }
+        }
+      }
+    } catch (err) {
+      logger.warn({ err, userId, messageId: row.gmailMessageId }, 'pre-compute label-rec failed');
+    }
+
     const result = await proposeAndRefine({
       email,
       nowIso: new Date().toISOString(),
       timezone,
       model: user?.claudeModel ?? undefined,
       searchMatches: (query) => searchMatchesForRule(userId, query),
+      preferredLabel,
     });
 
     const proposal: CleanupProposal = {
