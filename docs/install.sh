@@ -56,12 +56,46 @@ if [ "$OS" != "Darwin" ] || [ "$ARCH" != "arm64" ]; then
     Track progress at https://github.com/Supar-work/gmail-ai-manager/issues."
 fi
 
-# ── 2. Clone or update ───────────────────────────────────────────────────
-if [ ! -d "$SRC_DIR/.git" ]; then
-  printf "${BOLD}▸ Cloning into %s${RESET}\n" "$SRC_DIR"
-  if ! command -v git >/dev/null 2>&1; then
-    die "git is not installed. Run  xcode-select --install  and try again."
+# ── 2. Xcode Command Line Tools ──────────────────────────────────────────
+# macOS ships a /usr/bin/git stub that forwards to the Command Line Tools;
+# without them, git (and many Homebrew builds) fails. `command -v git`
+# always succeeds because the stub exists — we need to verify the tools are
+# actually installed via `xcode-select -p`.
+ensure_xcode_clt() {
+  if xcode-select -p >/dev/null 2>&1; then
+    return 0
   fi
+  printf "\n${BOLD}▸ Xcode Command Line Tools are required but not installed.${RESET}\n"
+  printf "${DIM}  They provide git, clang, make, etc. (~500 MB download).${RESET}\n\n"
+
+  # Reopen stdin from the controlling tty so read works when curl-piped.
+  if [ ! -t 0 ] && [ -r /dev/tty ]; then
+    exec < /dev/tty
+  fi
+  local reply
+  printf "  Install them now? [Y/n] "
+  read -r reply
+  case "$reply" in
+    [nN]*)
+      die "Xcode CLT required. Re-run after:  xcode-select --install"
+      ;;
+  esac
+
+  printf "${BOLD}▸ Triggering installer${RESET} ${DIM}(a system dialog will appear)${RESET}\n"
+  xcode-select --install >/dev/null 2>&1 || true
+
+  printf "  Waiting for install to complete"
+  while ! xcode-select -p >/dev/null 2>&1; do
+    printf "."
+    sleep 5
+  done
+  printf " ${GREEN}done${RESET}\n"
+}
+
+# ── 3. Clone or update ───────────────────────────────────────────────────
+if [ ! -d "$SRC_DIR/.git" ]; then
+  ensure_xcode_clt
+  printf "${BOLD}▸ Cloning into %s${RESET}\n" "$SRC_DIR"
   mkdir -p "$(dirname "$SRC_DIR")"
   git clone --branch "$REF" --depth 1 "$REPO_URL" "$SRC_DIR"
 else
