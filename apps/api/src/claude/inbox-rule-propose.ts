@@ -302,6 +302,14 @@ function buildProposePrompt(args: {
     disposition: 'inbox' | 'archive';
     reasoning: string;
   };
+  /**
+   * Cross-cutting "always check this" guidance the user maintains in
+   * Settings (User.aiGuidance, falling back to DEFAULT_AI_GUIDANCE).
+   * Goes ABOVE the per-class action guidance so Claude evaluates these
+   * patterns first — e.g., "OTP → archive after 1 hour" wins over the
+   * sender's category default.
+   */
+  aiGuidance?: string;
   previousAttempt?: {
     rule: string;
     gmailQuery: string;
@@ -309,7 +317,7 @@ function buildProposePrompt(args: {
     sampleSummary: string;
   };
 }): string {
-  const { email, nowIso, timezone, previousAttempt, preferredLabel } = args;
+  const { email, nowIso, timezone, previousAttempt, preferredLabel, aiGuidance } = args;
 
   const emailBlock = JSON.stringify(
     {
@@ -336,6 +344,21 @@ ${previousAttempt.sampleSummary}
 Adjust the query so it captures only the coherent group (tighten, broaden,
 or rename as needed). If no coherent group can be defined for this email,
 return a more specific rule that at least matches this one email correctly.
+`
+    : '';
+
+  const guidanceBlock = aiGuidance && aiGuidance.trim()
+    ? `
+═══════════════════════════════════════════════════════════════════════
+USER AI GUIDANCE (cross-cutting; always check before per-class defaults):
+
+${aiGuidance.trim()}
+
+These patterns OVERRIDE the per-class actions when they apply. Mention
+the override in the NL so the user understands why the timing differs
+from the sender's class default ("archive 1 hour after arrival" vs
+"archive immediately").
+═══════════════════════════════════════════════════════════════════════
 `
     : '';
 
@@ -369,19 +392,21 @@ single inbox email, produce:
   5. a confidence between 0 and 1.
 
 Before emitting actions:
-  (a) Read the body carefully and apply the TODO DETECTION rule below.
+  (a) Check the USER AI GUIDANCE block first — those cross-cutting
+      patterns override per-class defaults when they apply.
+  (b) Read the body carefully and apply the TODO DETECTION rule below.
       If the email has a pending action for the user, DO NOT archive.
-  (b) Decide on the predicate that generalizes this email — see the
+  (c) Decide on the predicate that generalizes this email — see the
       SPECIFICITY RULE below. Prefer sender / domain over body content
       for human replies.
-  (c) If a pre-computed canonical label is provided below, use that
+  (d) If a pre-computed canonical label is provided below, use that
       label path verbatim in any addLabel actions and in the NL. The
       downstream Suggested-label UI panel uses the SAME classifier
       output, so deviating will create a visible disagreement.
 
 Current time (UTC): ${nowIso}
 User timezone:      ${timezone}
-${preferredLabelBlock}
+${guidanceBlock}${preferredLabelBlock}
 ${COMMON_ACTION_GUIDANCE}
 ${refineBlock}
 THE EMAIL:
@@ -480,6 +505,12 @@ export type ProposeAndRefineArgs = {
     disposition: 'inbox' | 'archive';
     reasoning: string;
   };
+  /**
+   * User-edited cross-cutting guidance (User.aiGuidance, falling back
+   * to DEFAULT_AI_GUIDANCE). Pass-through to the prompt; caller is
+   * responsible for resolving the default.
+   */
+  aiGuidance?: string;
   model?: string;
 };
 
@@ -523,6 +554,7 @@ export async function proposeAndRefine(
       timezone,
       previousAttempt,
       preferredLabel: args.preferredLabel,
+      aiGuidance: args.aiGuidance,
     });
     current = await runClaudeJson(proposePrompt, ProposeResponseSchema, {
       model,
@@ -650,9 +682,12 @@ export async function reproposeForEditedRule(args: {
   editedNaturalLanguage: string;
   nowIso: string;
   timezone: string;
+  /** Same cross-cutting guidance the proposer uses. Even on user
+   *  edits, OTP-style overrides should still inform action timing. */
+  aiGuidance?: string;
   model?: string;
 }): Promise<ReproposeResponse> {
-  const { email, editedNaturalLanguage, nowIso, timezone } = args;
+  const { email, editedNaturalLanguage, nowIso, timezone, aiGuidance } = args;
   const model = args.model ?? MODEL;
 
   const emailBlock = JSON.stringify(
@@ -668,6 +703,10 @@ export async function reproposeForEditedRule(args: {
     2,
   );
 
+  const guidanceBlock = aiGuidance && aiGuidance.trim()
+    ? `\nUSER AI GUIDANCE (cross-cutting; respect these even on user edits):\n${aiGuidance.trim()}\n`
+    : '';
+
   const prompt = `The user has edited a rule text. Re-derive the action list and Gmail
 search query to match the EDITED text exactly (self-consistency rule
 below). The source email is supplied for context but the edited rule is
@@ -675,7 +714,7 @@ the authoritative source of truth for both actions and semantics.
 
 Current time (UTC): ${nowIso}
 User timezone:      ${timezone}
-
+${guidanceBlock}
 ${COMMON_ACTION_GUIDANCE}
 
 EDITED RULE: ${JSON.stringify(editedNaturalLanguage)}

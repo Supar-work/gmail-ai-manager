@@ -27,6 +27,12 @@ model User {
   // Null = let Claude Code CLI pick its default. Otherwise a model id like
   // "claude-haiku-4-5-20251001" passed as --model to each `claude -p` call.
   claudeModel         String?
+  // Free-form bullet-list of cross-cutting patterns the AI should always
+  // consider when proposing or evaluating rules. Examples: "one-time
+  // codes → archive after an hour", "calendar invites → keep in inbox
+  // until event passes". Null = use the curated default in
+  // apps/api/src/claude/ai-guidance.ts. Surfaced in Settings → AI guidance.
+  aiGuidance          String?
   createdAt           DateTime   @default(now())
   updatedAt           DateTime   @updatedAt
 

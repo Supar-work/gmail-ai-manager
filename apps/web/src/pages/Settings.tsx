@@ -10,6 +10,14 @@ type SettingsResponse = {
   pollIntervalSec: number;
   timezone: string;
   claudeModel: string | null;
+  /** User's editable cross-cutting AI guidance, or null if unset
+   *  (server falls back to the default). */
+  aiGuidance?: string | null;
+  /** What the proposer actually sees — either the user override or
+   *  the default. Read-only on the server side. */
+  aiGuidanceEffective?: string;
+  /** The factory default, surfaced for the "Reset to defaults" button. */
+  aiGuidanceDefault?: string;
 };
 type RunRow = {
   id: string;
@@ -43,6 +51,7 @@ export function Settings() {
 
       <ClaudeModelSection />
       <SyncFrequencySection />
+      <AiGuidanceSection />
       <BackupRestoreSection />
       <RunHistorySection onOpen={setViewingRunId} />
 
@@ -213,6 +222,120 @@ type ExportPayload = {
     gmailFilters: unknown[];
   };
 };
+
+// ── AI guidance ───────────────────────────────────────────────────────────
+
+/**
+ * Cross-cutting "always check first" patterns the inbox-cleanup proposer
+ * uses to override per-class defaults. Edited as a free-form bullet list;
+ * the server stores it on User.aiGuidance and falls back to a curated
+ * default when null.
+ *
+ * Examples baked into the default text:
+ *   - one-time codes / OTPs → archive 1h after arrival
+ *   - past-event calendar invites → archive immediately
+ *   - newsletters where the user never clicks → archive immediately
+ */
+function AiGuidanceSection() {
+  const qc = useQueryClient();
+  const s = useQuery<SettingsResponse>({
+    queryKey: ['settings'],
+    queryFn: () => apiGet('/api/settings'),
+  });
+  const [draft, setDraft] = useState<string | null>(null);
+  // Track whether the user's current draft equals the factory default
+  // — when so, we save `null` to the server (falls back to default,
+  // so future tweaks to the curated default flow through).
+  useEffect(() => {
+    if (s.data && draft == null) {
+      setDraft(s.data.aiGuidance ?? s.data.aiGuidanceEffective ?? '');
+    }
+  }, [s.data, draft]);
+
+  const save = useMutation<SettingsResponse, Error, string | null>({
+    mutationFn: (val) =>
+      apiSend<SettingsResponse>('PUT', '/api/settings', { aiGuidance: val }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['settings'] }),
+  });
+
+  if (s.isLoading) return <section className="settings-section">Loading…</section>;
+  if (s.isError)
+    return (
+      <section className="settings-section banner error">
+        Failed to load settings.
+      </section>
+    );
+
+  const data = s.data!;
+  const effective = data.aiGuidanceEffective ?? '';
+  const factoryDefault = data.aiGuidanceDefault ?? '';
+  const draftText = draft ?? '';
+  const dirty = draftText.trim() !== (data.aiGuidance ?? effective).trim();
+  const usingDefault =
+    !data.aiGuidance || data.aiGuidance.trim() === factoryDefault.trim();
+  const canResetToDefault =
+    draftText.trim() !== factoryDefault.trim() && factoryDefault.length > 0;
+
+  return (
+    <section className="settings-section">
+      <h2>AI guidance</h2>
+      <p className="muted" style={{ fontSize: '0.85rem' }}>
+        Cross-cutting patterns the inbox-cleanup proposer always checks before
+        falling back to per-sender / per-category defaults. Use this for things
+        like <em>one-time codes archive after an hour</em> or
+        <em> calendar invites stay until the event passes</em> — overrides
+        that should apply across many classes of email.
+      </p>
+      <textarea
+        value={draftText}
+        onChange={(e) => setDraft(e.target.value)}
+        rows={12}
+        spellCheck={false}
+        style={{
+          width: '100%',
+          fontFamily: 'ui-monospace, Menlo, monospace',
+          fontSize: '0.82rem',
+        }}
+      />
+      <div className="row" style={{ marginTop: '0.5rem', flexWrap: 'wrap' }}>
+        <button
+          className="primary"
+          onClick={() => {
+            // Save `null` when the user reset to the factory default so
+            // future curated changes flow through automatically.
+            const trimmed = draftText.trim();
+            const next =
+              trimmed === '' || trimmed === factoryDefault.trim() ? null : trimmed;
+            save.mutate(next);
+          }}
+          disabled={!dirty || save.isPending}
+        >
+          {save.isPending ? 'Saving…' : 'Save'}
+        </button>
+        <button
+          onClick={() => setDraft(factoryDefault)}
+          disabled={!canResetToDefault}
+          title="Replace the textarea with the factory default"
+        >
+          Reset to default
+        </button>
+        {save.isSuccess && !dirty && (
+          <span className="muted" style={{ fontSize: '0.78rem' }}>
+            Saved.
+          </span>
+        )}
+        {usingDefault && !dirty && (
+          <span className="muted" style={{ fontSize: '0.78rem' }}>
+            Currently using the factory default.
+          </span>
+        )}
+      </div>
+      {save.isError && (
+        <div className="banner error">{(save.error as Error).message}</div>
+      )}
+    </section>
+  );
+}
 
 /**
  * UI surface for the same backup / restore flow that scripts/backup.sh
