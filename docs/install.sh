@@ -68,13 +68,15 @@ ensure_xcode_clt() {
   printf "\n${BOLD}▸ Xcode Command Line Tools are required but not installed.${RESET}\n"
   printf "${DIM}  They provide git, clang, make, etc. (~500 MB download).${RESET}\n\n"
 
-  # Reopen stdin from the controlling tty so read works when curl-piped.
-  if [ ! -t 0 ] && [ -r /dev/tty ]; then
-    exec < /dev/tty
+  # IMPORTANT: when this script is invoked via `curl … | bash`, stdin is the
+  # pipe carrying the rest of the script source. Do NOT `exec < /dev/tty` —
+  # that replaces the pipe and bash loses the unread portion of itself,
+  # falling into an interactive prompt. Read directly from /dev/tty instead.
+  local reply=""
+  if [ -r /dev/tty ]; then
+    printf "  Install them now? [Y/n] "
+    read -r reply < /dev/tty
   fi
-  local reply
-  printf "  Install them now? [Y/n] "
-  read -r reply
   case "$reply" in
     [nN]*)
       die "Xcode CLT required. Re-run after:  xcode-select --install"
