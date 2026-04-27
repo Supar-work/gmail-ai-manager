@@ -7,6 +7,7 @@ import { env } from '../env.js';
 import { logger } from '../logger.js';
 import { syncInbox } from '../gmail/sync.js';
 import { pMapLimit } from '../util/concurrency.js';
+import { recordAgentAction } from '../audit/record.js';
 
 export type ClassifyRunResult = {
   scanned: number;
@@ -256,7 +257,11 @@ export async function classifyRecent(
         const resolved = resolveRunAt(runAt, { now, timezone: user.timezone });
         if (resolved === 'immediate') {
           try {
-            await applyAction(userId, row.gmailMessageId, action);
+            await applyAction(userId, row.gmailMessageId, action, {
+              source: 'rule',
+              sourceId: rule.id,
+              reasoning: match.reasoning,
+            });
             actionsApplied.push({
               ruleId: rule.id,
               action,
@@ -285,6 +290,22 @@ export async function classifyRecent(
               runAt: resolved.runAtUtc,
               reasoning: match.reasoning,
             },
+          });
+          // Audit the scheduling itself; the actual mutation gets its
+          // own row when the scheduler fires.
+          await recordAgentAction({
+            userId,
+            source: 'rule',
+            sourceId: rule.id,
+            targetType: 'scheduledAction',
+            targetId: sched.id,
+            toolName: 'schedule.add',
+            toolInputJson: JSON.stringify({
+              gmailMessageId: row.gmailMessageId,
+              action,
+              runAt: resolved.runAtUtc.toISOString(),
+            }),
+            reasoning: match.reasoning,
           });
           actionsScheduled.push({
             ruleId: rule.id,

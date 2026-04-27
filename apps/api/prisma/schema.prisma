@@ -44,6 +44,46 @@ model User {
   classifyRuns        ClassifyRun[]
   inboxMessages       InboxMessage[]
   gmailFilters        GmailFilter[]
+  agentActions        AgentAction[]
+}
+
+// One row per Gmail-mutating (or rule/schedule-mutating) tool call.
+// Drives the Settings → Audit log UI and the chat surface's "what the
+// agent did" trail. Every code path that mutates state is supposed to
+// emit a row via `apps/api/src/audit/record.ts`; the chat agent (when
+// it lands) hits this through MCP tools.
+//
+// `reversibleAs` is non-null when the action has a deterministic inverse
+// (label add ↔ remove, archive ↔ unarchive). One-click reversal in the
+// UI re-applies that inverse and links the original row to the new one
+// via `reversedAt` + `reversedBy`.
+model AgentAction {
+  id             String   @id @default(cuid())
+  userId         String
+  // What context produced this action.
+  source         String   // "rule" | "schedule" | "cleanup" | "chat" | "consolidator"
+  sourceId       String?  // ChatMessage.id / Rule.id / ScheduledAction.id / etc
+  // What the agent touched.
+  targetType     String   // "gmailMessage" | "gmailLabel" | "rule" | "scheduledAction"
+  targetId       String   // gmailMessageId / labelName / ruleId / etc
+  // The actual tool invocation. Tool name is namespaced ("inbox.apply",
+  // "rules.create"). toolInputJson is the JSON-encoded args struct.
+  toolName       String
+  toolInputJson  String
+  toolResultJson String?
+  reasoning      String?
+  // JSON-encoded inverse Action when one exists, or null. The reversal
+  // endpoint re-runs that Action and writes a new AgentAction row.
+  reversibleAs   String?
+  reversedAt     DateTime?
+  reversedBy     String?
+  createdAt      DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([userId, source, createdAt])
+  @@index([userId, targetType, targetId])
 }
 
 // Authoritative local mirror of every Gmail filter we've ever seen for this

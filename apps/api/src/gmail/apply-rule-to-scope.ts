@@ -4,6 +4,7 @@ import { applyAction } from './actions.js';
 import { resolveRunAt } from '../time/resolve.js';
 import { pMapLimit } from '../util/concurrency.js';
 import { logger } from '../logger.js';
+import { recordAgentAction } from '../audit/record.js';
 import {
   listAllMailIdsForQuery,
   listInboxIdsForQuery,
@@ -68,7 +69,11 @@ export async function applyRuleToScope(params: {
 
       if (when === 'immediate') {
         try {
-          await applyAction(userId, gmailMessageId, action);
+          await applyAction(userId, gmailMessageId, action, {
+            source: 'cleanup',
+            sourceId: ruleId,
+            reasoning: 'inbox-cleanup wizard apply',
+          });
           appliedImmediateCount++;
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -84,7 +89,7 @@ export async function applyRuleToScope(params: {
 
       if ('runAtUtc' in when) {
         try {
-          await prisma.scheduledAction.create({
+          const scheduled = await prisma.scheduledAction.create({
             data: {
               userId,
               ruleId,
@@ -93,6 +98,26 @@ export async function applyRuleToScope(params: {
               runAt: when.runAtUtc,
               status: 'pending',
             },
+            select: { id: true },
+          });
+          // Record the scheduling itself (not the eventual mutation —
+          // that's logged by the scheduler when it fires). Reversal of a
+          // scheduled-but-not-yet-fired action means cancelling the
+          // ScheduledAction row, so reversibleAs is null here; the
+          // audit-log UI offers a "Cancel" button for unfired schedules.
+          await recordAgentAction({
+            userId,
+            source: 'cleanup',
+            sourceId: ruleId,
+            targetType: 'scheduledAction',
+            targetId: scheduled.id,
+            toolName: 'schedule.add',
+            toolInputJson: JSON.stringify({
+              gmailMessageId,
+              action,
+              runAt: when.runAtUtc.toISOString(),
+            }),
+            reasoning: 'inbox-cleanup wizard scheduled deferred action',
           });
           scheduledCount++;
         } catch (err) {

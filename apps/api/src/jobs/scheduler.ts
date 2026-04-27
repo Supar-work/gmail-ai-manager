@@ -48,7 +48,11 @@ export async function tick(): Promise<{ processed: number }> {
 
     try {
       const action = JSON.parse(s.action) as Action;
-      await applyAction(s.userId, s.gmailMessageId, action);
+      await applyAction(s.userId, s.gmailMessageId, action, {
+        source: 'schedule',
+        sourceId: s.id,
+        reasoning: `scheduled action firing at ${s.runAt.toISOString()}`,
+      });
       await prisma.scheduledAction.update({
         where: { id: s.id },
         data: { status: 'done', attempts: { increment: 1 } },

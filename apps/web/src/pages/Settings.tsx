@@ -52,6 +52,7 @@ export function Settings() {
       <ClaudeModelSection />
       <SyncFrequencySection />
       <AiGuidanceSection />
+      <AuditLogSection />
       <BackupRestoreSection />
       <RunHistorySection onOpen={setViewingRunId} />
 
@@ -222,6 +223,205 @@ type ExportPayload = {
     gmailFilters: unknown[];
   };
 };
+
+// ── Audit log ─────────────────────────────────────────────────────────────
+
+type AgentActionRow = {
+  id: string;
+  source: 'rule' | 'schedule' | 'cleanup' | 'chat' | 'consolidator';
+  sourceId: string | null;
+  targetType: 'gmailMessage' | 'gmailLabel' | 'rule' | 'scheduledAction';
+  targetId: string;
+  toolName: string;
+  toolInput: unknown;
+  toolResult: unknown;
+  reasoning: string | null;
+  reversibleAs: unknown;
+  reversedAt: string | null;
+  reversedBy: string | null;
+  createdAt: string;
+};
+
+type AgentActionsResponse = {
+  rows: AgentActionRow[];
+  nextCursor: string | null;
+};
+
+/**
+ * Read-only audit table over every Gmail-mutating action the system has
+ * taken — rules, schedules, cleanup wizard, the future chat agent. Each
+ * row exposes a one-click "Reverse" button when an inverse Action was
+ * recorded with it (label add ↔ remove, archive ↔ un-archive, etc.).
+ */
+function AuditLogSection() {
+  const qc = useQueryClient();
+  const [source, setSource] = useState<AgentActionRow['source'] | ''>('');
+
+  const list = useQuery<AgentActionsResponse>({
+    queryKey: ['agent-actions', source],
+    queryFn: () =>
+      apiGet<AgentActionsResponse>(
+        `/api/agent-actions?limit=50${source ? `&source=${source}` : ''}`,
+      ),
+    refetchInterval: 10_000,
+    retry: false,
+  });
+
+  const reverse = useMutation<unknown, Error, string>({
+    mutationFn: (id) => apiSend('POST', `/api/agent-actions/${id}/reverse`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['agent-actions'] }),
+  });
+
+  return (
+    <section className="settings-section">
+      <h2>Audit log</h2>
+      <p className="muted" style={{ fontSize: '0.85rem' }}>
+        Every Gmail-mutating action the system takes — rules, schedules, cleanup
+        wizard, and (soon) the chat agent. Most actions can be reversed in one
+        click; reversal itself shows up as another row so the trail is complete.
+      </p>
+
+      <div className="row" style={{ gap: '0.4rem', marginBottom: '0.5rem', alignItems: 'center' }}>
+        <label className="muted" style={{ fontSize: '0.78rem' }}>
+          Source:
+        </label>
+        <select
+          value={source}
+          onChange={(e) => setSource(e.target.value as AgentActionRow['source'] | '')}
+        >
+          <option value="">all</option>
+          <option value="rule">rule</option>
+          <option value="schedule">schedule</option>
+          <option value="cleanup">cleanup</option>
+          <option value="chat">chat</option>
+          <option value="consolidator">consolidator</option>
+        </select>
+      </div>
+
+      {list.isLoading && <div className="muted">Loading…</div>}
+      {list.isError && (
+        <div className="banner error">
+          Couldn't load audit log: {(list.error as Error).message}
+        </div>
+      )}
+      {list.data && list.data.rows.length === 0 && (
+        <div className="muted">No actions recorded yet.</div>
+      )}
+
+      {list.data && list.data.rows.length > 0 && (
+        <table className="table runs-table">
+          <thead>
+            <tr>
+              <th>When</th>
+              <th>Source</th>
+              <th>Tool</th>
+              <th>Target</th>
+              <th>Reasoning</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {list.data.rows.map((r) => (
+              <AuditLogRow
+                key={r.id}
+                row={r}
+                onReverse={() => reverse.mutate(r.id)}
+                reversing={reverse.isPending && reverse.variables === r.id}
+              />
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      {reverse.isError && (
+        <div className="banner error" style={{ marginTop: '0.4rem' }}>
+          Reverse failed: {(reverse.error as Error).message}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function AuditLogRow({
+  row,
+  onReverse,
+  reversing,
+}: {
+  row: AgentActionRow;
+  onReverse: () => void;
+  reversing: boolean;
+}) {
+  const reversible = row.reversibleAs != null && row.reversedAt == null;
+  const targetLabel = describeTarget(row);
+  const toolInputLabel = describeToolInput(row);
+  return (
+    <tr style={{ opacity: row.reversedAt ? 0.55 : 1 }}>
+      <td className="muted" style={{ fontSize: '0.76rem', whiteSpace: 'nowrap' }}>
+        {new Date(row.createdAt).toLocaleString()}
+      </td>
+      <td>
+        <span className="chip">{row.source}</span>
+      </td>
+      <td style={{ fontFamily: 'ui-monospace, Menlo, monospace', fontSize: '0.78rem' }}>
+        {row.toolName}
+      </td>
+      <td style={{ fontSize: '0.82rem' }}>
+        {targetLabel}
+        {toolInputLabel && (
+          <div className="muted" style={{ fontSize: '0.74rem' }}>
+            {toolInputLabel}
+          </div>
+        )}
+      </td>
+      <td className="muted" style={{ fontSize: '0.78rem', maxWidth: 280 }}>
+        {row.reasoning ?? '—'}
+      </td>
+      <td>
+        {row.reversedAt ? (
+          <span className="muted" style={{ fontSize: '0.78rem' }}>
+            reversed
+          </span>
+        ) : reversible ? (
+          <button onClick={onReverse} disabled={reversing}>
+            {reversing ? 'Reversing…' : 'Reverse'}
+          </button>
+        ) : (
+          <span className="muted" style={{ fontSize: '0.78rem' }}>
+            n/a
+          </span>
+        )}
+      </td>
+    </tr>
+  );
+}
+
+function describeTarget(row: AgentActionRow): string {
+  switch (row.targetType) {
+    case 'gmailMessage':
+      return `msg ${row.targetId.slice(0, 12)}…`;
+    case 'gmailLabel':
+      return `label ${row.targetId}`;
+    case 'rule':
+      return `rule ${row.targetId.slice(0, 8)}…`;
+    case 'scheduledAction':
+      return `scheduled ${row.targetId.slice(0, 8)}…`;
+  }
+}
+
+function describeToolInput(row: AgentActionRow): string | null {
+  if (!row.toolInput || typeof row.toolInput !== 'object') return null;
+  const obj = row.toolInput as Record<string, unknown>;
+  // For inbox.* tools, show the action type + label name.
+  if (typeof obj.type === 'string') {
+    const name = typeof obj.labelName === 'string' ? ` "${obj.labelName}"` : '';
+    return `${obj.type}${name}`;
+  }
+  // For schedule.add, show the runAt.
+  if (typeof obj.runAt === 'string') {
+    return `runs at ${obj.runAt}`;
+  }
+  return null;
+}
 
 // ── AI guidance ───────────────────────────────────────────────────────────
 

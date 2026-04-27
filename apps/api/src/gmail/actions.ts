@@ -2,6 +2,25 @@ import type { Action } from '@gam/shared';
 import type { gmail_v1 } from 'googleapis';
 import { gmailForUser } from './client.js';
 import { logger } from '../logger.js';
+import {
+  inverseAction,
+  recordAgentAction,
+  type AuditSource,
+} from '../audit/record.js';
+
+/**
+ * Optional audit context the caller passes when applying an action so the
+ * audit log can show where the mutation came from. Omitting it skips the
+ * log row — useful for tests or admin scripts that shouldn't pollute the
+ * user-facing audit trail.
+ */
+export type ApplyAuditCtx = {
+  source: AuditSource;
+  /** ChatMessage.id / Rule.id / ScheduledAction.id depending on `source`. */
+  sourceId?: string | null;
+  /** Free-form rationale ("classifier matched rule cmo7..."). */
+  reasoning?: string | null;
+};
 
 export async function ensureLabel(userId: string, name: string): Promise<string> {
   const gmail = await gmailForUser(userId);
@@ -20,6 +39,7 @@ export async function applyAction(
   userId: string,
   gmailMessageId: string,
   action: Action,
+  auditCtx?: ApplyAuditCtx,
 ): Promise<void> {
   const gmail = await gmailForUser(userId);
 
@@ -37,10 +57,19 @@ export async function applyAction(
       id: gmailMessageId,
       requestBody: { removeLabelIds: ['INBOX'] },
     });
+    // Audit-log the resulting archive (not the requested trash) so the
+    // user sees what actually happened.
+    await recordAuditFor(auditCtx, {
+      userId,
+      gmailMessageId,
+      action: { type: 'archive', runAt: action.runAt },
+      reasoning: auditCtx?.reasoning ?? 'trash downgraded to archive (policy)',
+    });
     return;
   }
   if (action.type === 'forward') {
     await forwardMessage(gmail, userId, gmailMessageId, action.to);
+    await recordAuditFor(auditCtx, { userId, gmailMessageId, action });
     return;
   }
 
@@ -63,7 +92,6 @@ export async function applyAction(
       addLabelIds.push(await ensureLabel(userId, action.labelName));
       break;
     case 'removeLabel':
-      addLabelIds.push(); // no-op
       removeLabelIds.push(await ensureLabel(userId, action.labelName));
       break;
   }
@@ -74,6 +102,30 @@ export async function applyAction(
     userId: 'me',
     id: gmailMessageId,
     requestBody: { addLabelIds, removeLabelIds },
+  });
+  await recordAuditFor(auditCtx, { userId, gmailMessageId, action });
+}
+
+async function recordAuditFor(
+  auditCtx: ApplyAuditCtx | undefined,
+  payload: {
+    userId: string;
+    gmailMessageId: string;
+    action: Action;
+    reasoning?: string | null;
+  },
+): Promise<void> {
+  if (!auditCtx) return;
+  await recordAgentAction({
+    userId: payload.userId,
+    source: auditCtx.source,
+    sourceId: auditCtx.sourceId ?? null,
+    targetType: 'gmailMessage',
+    targetId: payload.gmailMessageId,
+    toolName: `inbox.${payload.action.type}`,
+    toolInputJson: JSON.stringify(payload.action),
+    reasoning: payload.reasoning ?? auditCtx.reasoning ?? null,
+    reversibleAs: inverseAction(payload.action),
   });
 }
 
