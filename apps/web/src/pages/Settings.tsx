@@ -18,7 +18,15 @@ type SettingsResponse = {
   aiGuidanceEffective?: string;
   /** The factory default, surfaced for the "Reset to defaults" button. */
   aiGuidanceDefault?: string;
+  /** Auto-learned memory bullet list distilled by the consolidator. */
+  learnedMemory?: string | null;
+  /** ISO timestamp of last consolidation, or null if never run. */
+  learnedMemoryAt?: string | null;
 };
+
+type ConsolidationResult =
+  | { ran: true; patternsCount: number; memo: string }
+  | { ran: false; reason: string };
 type RunRow = {
   id: string;
   startedAt: string;
@@ -533,7 +541,106 @@ function AiGuidanceSection() {
       {save.isError && (
         <div className="banner error">{(save.error as Error).message}</div>
       )}
+
+      {/* Auto-learned memory section — read-only, refreshable on demand. */}
+      <LearnedMemoryPanel data={data} qc={qc} />
     </section>
+  );
+}
+
+/**
+ * Read-only sub-panel under AI guidance showing the memory consolidator's
+ * latest distilled memo. The consolidator runs hourly in the background;
+ * this panel surfaces "what it learned" + a button to re-run it now.
+ */
+function LearnedMemoryPanel({
+  data,
+  qc,
+}: {
+  data: SettingsResponse;
+  qc: ReturnType<typeof useQueryClient>;
+}) {
+  const [open, setOpen] = useState(false);
+  const consolidate = useMutation<ConsolidationResult, Error>({
+    mutationFn: () => apiSend<ConsolidationResult>('POST', '/api/settings/consolidate-memory'),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['settings'] }),
+  });
+
+  const memory = data.learnedMemory ?? '';
+  const lastRun = data.learnedMemoryAt
+    ? new Date(data.learnedMemoryAt).toLocaleString()
+    : null;
+
+  return (
+    <details
+      open={open}
+      onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}
+      style={{ marginTop: '0.7rem' }}
+    >
+      <summary
+        className="muted"
+        style={{ fontSize: '0.78rem', cursor: 'pointer' }}
+      >
+        Learned memory{' '}
+        {lastRun ? (
+          <span style={{ fontSize: '0.74rem' }}>· last updated {lastRun}</span>
+        ) : (
+          <span style={{ fontSize: '0.74rem' }}>· not yet generated</span>
+        )}
+      </summary>
+      <div
+        className="panel"
+        style={{ marginTop: '0.4rem', padding: '0.7rem 0.85rem', fontSize: '0.85rem' }}
+      >
+        <div className="muted" style={{ fontSize: '0.78rem', marginBottom: '0.5rem' }}>
+          Auto-distilled by the memory consolidator from your audit log + rule
+          decisions. The proposer reads this alongside your guidance text above
+          when drafting new rules. Edit your guidance to override anything that
+          looks wrong.
+        </div>
+        {memory ? (
+          <pre
+            style={{
+              fontFamily: 'ui-monospace, Menlo, monospace',
+              fontSize: '0.78rem',
+              whiteSpace: 'pre-wrap',
+              margin: 0,
+            }}
+          >
+            {memory}
+          </pre>
+        ) : (
+          <div className="muted">
+            Nothing learned yet. The consolidator runs hourly once enough audit
+            data accumulates. Click below to force a run.
+          </div>
+        )}
+        <div className="row" style={{ marginTop: '0.6rem' }}>
+          <button
+            onClick={() => consolidate.mutate()}
+            disabled={consolidate.isPending}
+          >
+            {consolidate.isPending ? 'Consolidating…' : 'Refresh now'}
+          </button>
+          {consolidate.isSuccess && consolidate.data && !consolidate.data.ran && (
+            <span className="muted" style={{ fontSize: '0.78rem' }}>
+              Skipped: {consolidate.data.reason}
+            </span>
+          )}
+          {consolidate.isSuccess && consolidate.data?.ran && (
+            <span className="muted" style={{ fontSize: '0.78rem' }}>
+              Found {consolidate.data.patternsCount} pattern
+              {consolidate.data.patternsCount === 1 ? '' : 's'}.
+            </span>
+          )}
+        </div>
+        {consolidate.isError && (
+          <div className="banner error" style={{ marginTop: '0.4rem' }}>
+            {(consolidate.error as Error).message}
+          </div>
+        )}
+      </div>
+    </details>
   );
 }
 

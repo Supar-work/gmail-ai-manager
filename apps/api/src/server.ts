@@ -21,6 +21,7 @@ import { gmailFiltersRouter } from './routes/gmail-filters.js';
 import { inboxCleanupRouter } from './routes/inbox-cleanup.js';
 import { agentActionsRouter } from './routes/agent-actions.js';
 import { startScheduler } from './jobs/scheduler.js';
+import { startMemoryConsolidator } from './jobs/memory-consolidator.js';
 import { startPoller } from './gmail/poll.js';
 
 const app = express();
@@ -81,4 +82,5 @@ app.listen(env.PORT, () => {
   logger.info({ port: env.PORT, env: env.NODE_ENV }, 'api listening');
   startScheduler();
   startPoller();
+  startMemoryConsolidator();
 });

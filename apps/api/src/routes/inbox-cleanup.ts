@@ -21,7 +21,7 @@ import {
   reproposeForEditedRule,
   type EmailForProposal,
 } from '../claude/inbox-rule-propose.js';
-import { effectiveGuidance } from '../claude/ai-guidance.js';
+import { effectiveGuidanceWithMemory } from '../claude/ai-guidance.js';
 import { searchMatchesForRule } from '../gmail/inbox-rule-search.js';
 import { applyRuleToScope } from '../gmail/apply-rule-to-scope.js';
 import {
@@ -290,7 +290,7 @@ inboxCleanupRouter.post('/session/:id/propose', async (req, res) => {
       model: user?.claudeModel ?? undefined,
       searchMatches: (query) => searchMatchesForRule(userId, query),
       preferredLabel,
-      aiGuidance: effectiveGuidance(user?.aiGuidance),
+      aiGuidance: effectiveGuidanceWithMemory(user?.aiGuidance, user?.learnedMemory),
     });
 
     const proposal: CleanupProposal = {
@@ -394,7 +394,7 @@ inboxCleanupRouter.post('/session/:id/preview-matches', async (req, res) => {
       nowIso: new Date().toISOString(),
       timezone: user?.timezone ?? 'UTC',
       model: user?.claudeModel ?? undefined,
-      aiGuidance: effectiveGuidance(user?.aiGuidance),
+      aiGuidance: effectiveGuidanceWithMemory(user?.aiGuidance, user?.learnedMemory),
     });
 
     const search = await searchMatchesForRule(userId, reproposed.gmailQuery, {

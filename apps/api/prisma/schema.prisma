@@ -33,6 +33,14 @@ model User {
   // until event passes". Null = use the curated default in
   // apps/api/src/claude/ai-guidance.ts. Surfaced in Settings → AI guidance.
   aiGuidance          String?
+  // Auto-learned bullet-list distilled by the memory consolidator
+  // (apps/api/src/jobs/memory-consolidator.ts) from EmailDecision history,
+  // user toggles, and (later) ChatMessages. Merged with `aiGuidance`
+  // before being passed to the proposer so the user sees one effective
+  // text but keeps the two cleanly separable. Null = no memory yet.
+  learnedMemory       String?
+  // When the consolidator last ran. Null until the first successful pass.
+  learnedMemoryAt     DateTime?
   createdAt           DateTime   @default(now())
   updatedAt           DateTime   @updatedAt
 

@@ -38,3 +38,22 @@ export function effectiveGuidance(stored: string | null | undefined): string {
   const trimmed = (stored ?? '').trim();
   return trimmed.length > 0 ? trimmed : DEFAULT_AI_GUIDANCE.trim();
 }
+
+/**
+ * Merge the user-edited (or factory-default) guidance with the
+ * memory-consolidator's learned memory. The combined text is what the
+ * proposer + chat agent see; the two halves are kept separate in the
+ * DB so the user can edit one without affecting the other.
+ *
+ * The learned-memory section is appended under a clear header so
+ * Claude can tell which lines are user-curated vs auto-learned.
+ */
+export function effectiveGuidanceWithMemory(
+  stored: string | null | undefined,
+  learnedMemory: string | null | undefined,
+): string {
+  const base = effectiveGuidance(stored);
+  const memory = (learnedMemory ?? '').trim();
+  if (!memory) return base;
+  return `${base}\n\n# Learned from your past actions (auto-updated)\n\n${memory}`;
+}
