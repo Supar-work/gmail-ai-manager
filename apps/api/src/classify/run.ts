@@ -427,5 +427,9 @@ function rowToClassifyEmail(row: InboxRow): ClassifyEmail {
     date: row.dateHeader,
     labels,
     body: row.bodyText,
+    listId: row.listId,
+    listPost: row.listPost,
+    originalFrom: row.originalFromHeader,
+    precedence: row.precedence,
   };
 }

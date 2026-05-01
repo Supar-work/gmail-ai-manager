@@ -20,7 +20,8 @@ export type AuditSource =
   | 'schedule'    // scheduled-action sweeper
   | 'cleanup'     // inbox-cleanup wizard apply
   | 'chat'        // chat agent
-  | 'consolidator'; // memory consolidator (rare; usually no Gmail mutation)
+  | 'consolidator' // memory consolidator (rare; usually no Gmail mutation)
+  | 'maintenance'; // rule-maintenance auditor (Settings → Rule maintenance)
 
 export type AuditTargetType =
   | 'gmailMessage'

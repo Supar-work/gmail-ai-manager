@@ -109,6 +109,17 @@ async function writeMessageRow(userId: string, data: gmail_v1.Schema$Message): P
 
   const bodyText = extractPlainText(data.payload);
   const internalDate = data.internalDate ? new Date(Number(data.internalDate)) : null;
+  const fromHeader = h('From');
+  const list = extractListMetadata({
+    fromHeader,
+    listIdRaw: h('List-ID') ?? h('List-Id'),
+    listPostRaw: h('List-Post'),
+    listUnsubRaw: h('List-Unsubscribe'),
+    replyTo: h('Reply-To'),
+    sender: h('Sender'),
+    xOriginalFrom: h('X-Original-From') ?? h('X-Google-Original-From'),
+    precedence: h('Precedence'),
+  });
 
   await prisma.inboxMessage.upsert({
     where: { userId_gmailMessageId: { userId, gmailMessageId: data.id } },
@@ -117,7 +128,7 @@ async function writeMessageRow(userId: string, data: gmail_v1.Schema$Message): P
       gmailMessageId: data.id,
       threadId: data.threadId ?? null,
       historyId: data.historyId ?? null,
-      fromHeader: h('From'),
+      fromHeader,
       toHeader: h('To'),
       subject: h('Subject'),
       snippet: data.snippet ?? null,
@@ -125,13 +136,124 @@ async function writeMessageRow(userId: string, data: gmail_v1.Schema$Message): P
       labelIds: JSON.stringify(data.labelIds ?? []),
       dateHeader: h('Date'),
       internalDate,
+      listId: list.listId,
+      listPost: list.listPost,
+      listUnsubscribe: list.listUnsubscribe,
+      originalFromHeader: list.originalFromHeader,
+      precedence: list.precedence,
     },
     update: {
       labelIds: JSON.stringify(data.labelIds ?? []),
       snippet: data.snippet ?? null,
       historyId: data.historyId ?? null,
+      // Update list metadata too — newly-discovered headers (e.g.
+      // user changed their forwarding setup) should refresh the row.
+      listId: list.listId,
+      listPost: list.listPost,
+      listUnsubscribe: list.listUnsubscribe,
+      originalFromHeader: list.originalFromHeader,
+      precedence: list.precedence,
     },
   });
+}
+
+/**
+ * Distil mailing-list / forwarding metadata from raw headers.
+ * Centralised here so the sync path AND any future re-extraction
+ * over old rows uses the same parsing.
+ *
+ * Returns:
+ *   - listId          — bare List-ID with `<>` stripped, lowercased
+ *   - listPost        — `mailto:` from List-Post (or first URL)
+ *   - listUnsubscribe — first URL/mailto from List-Unsubscribe
+ *   - originalFromHeader — Reply-To / Sender / X-Original-From when
+ *                         that disagrees with the visible From
+ *                         (Google Groups rewrites From to "X via
+ *                         Group <list@…>" — the original sender
+ *                         lives in Reply-To). Null when From is
+ *                         already the original.
+ *   - precedence      — bulk / list / junk / etc. (lowercased)
+ */
+export function extractListMetadata(args: {
+  fromHeader: string | null;
+  listIdRaw: string | null;
+  listPostRaw: string | null;
+  listUnsubRaw: string | null;
+  replyTo: string | null;
+  sender: string | null;
+  xOriginalFrom: string | null;
+  precedence: string | null;
+}): {
+  listId: string | null;
+  listPost: string | null;
+  listUnsubscribe: string | null;
+  originalFromHeader: string | null;
+  precedence: string | null;
+} {
+  const stripAngles = (s: string): string => {
+    const m = /<([^>]+)>/.exec(s);
+    return (m && m[1] ? m[1] : s).trim();
+  };
+  const listId = args.listIdRaw ? stripAngles(args.listIdRaw).toLowerCase() : null;
+  const listPost = args.listPostRaw ? stripAngles(args.listPostRaw) : null;
+  // List-Unsubscribe can have multiple comma-separated values (mailto + URL).
+  const listUnsubscribe = args.listUnsubRaw
+    ? stripAngles(args.listUnsubRaw.split(',')[0] ?? args.listUnsubRaw)
+    : null;
+
+  // Detect when the visible From was REWRITTEN away from the original
+  // sender (Google Groups, Mailman with rewrite-from, etc.). Without
+  // detection we'd over-attribute "originalFrom" on lists that just
+  // forward without rewriting (where Reply-To is the list itself,
+  // not the original sender).
+  //
+  // Three reliable signals, in order:
+  //   1. Explicit X-Original-From / X-Google-Original-From header.
+  //   2. The visible From contains Google Groups' canonical "X via
+  //      Group" rewrite marker — display name like
+  //      `"'Apple' via Zeligs"`.
+  //   3. Sender header has a different address than From AND Reply-To
+  //      isn't the same as From (rewrites generally show
+  //      Sender == list-address, From != original).
+  const fromAddr = args.fromHeader ? extractAddress(args.fromHeader) : null;
+  const senderAddr = args.sender ? extractAddress(args.sender) : null;
+  const replyToAddr = args.replyTo ? extractAddress(args.replyTo) : null;
+  const fromIsViaRewrite = args.fromHeader ? / via \S/.test(args.fromHeader) : false;
+  const senderDiffersFromFrom = !!(
+    senderAddr &&
+    fromAddr &&
+    senderAddr.toLowerCase() !== fromAddr.toLowerCase()
+  );
+
+  let originalFromHeader: string | null = null;
+  if (args.xOriginalFrom) {
+    originalFromHeader = args.xOriginalFrom.trim();
+  } else if (fromIsViaRewrite || senderDiffersFromFrom) {
+    // From was rewritten. Reply-To is the canonical recovery vector
+    // (Google Groups sets Reply-To to the original sender on rewrite).
+    if (
+      replyToAddr &&
+      fromAddr &&
+      replyToAddr.toLowerCase() !== fromAddr.toLowerCase()
+    ) {
+      originalFromHeader = (args.replyTo ?? '').trim() || null;
+    }
+  }
+
+  return {
+    listId,
+    listPost,
+    listUnsubscribe,
+    originalFromHeader,
+    precedence: args.precedence ? args.precedence.trim().toLowerCase() : null,
+  };
+}
+
+function extractAddress(headerValue: string): string | null {
+  const m = /<([^>]+)>/.exec(headerValue);
+  if (m && m[1]) return m[1].trim();
+  const t = headerValue.trim();
+  return /@/.test(t) ? t : null;
 }
 
 function extractPlainText(

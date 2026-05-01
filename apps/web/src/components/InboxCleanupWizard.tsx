@@ -3,15 +3,21 @@ import { useQueryClient } from '@tanstack/react-query';
 import type {
   Action,
   CleanupApplyResult,
+  CleanupCovered,
+  CleanupOutcome,
   CleanupPreview,
   CleanupProposal,
   CleanupSample,
   CleanupSession,
   InboxMessagePreview,
+  RuleToken,
 } from '@gam/shared';
 import { apiGet, apiSend, ApiError } from '../lib/api.js';
-import { RuleCheckPanel } from './RuleAnalyzer.js';
-import { EditableActionChip } from './EditableActionChip.js';
+import {
+  InlineChipEditor,
+  tokensToNaturalLanguage,
+  mergeAdjacentText,
+} from './InlineChipEditor.js';
 
 /**
  * Wizard that walks the user through their inbox, proposing one AI rule
@@ -51,8 +57,22 @@ export function InboxCleanupWizard({ onClose }: { onClose: () => void }) {
   const [covered, setCovered] = useState<Set<string>>(new Set());
   const [idx, setIdx] = useState(0);
   const [emailPreviews, setEmailPreviews] = useState<Record<string, InboxMessagePreview>>({});
-  const [proposals, setProposals] = useState<Record<string, CleanupProposal>>({});
+  const [proposals, setProposals] = useState<Record<string, CleanupOutcome>>({});
   const [edits, setEdits] = useState<Record<string, string>>({});
+  // Per-message draft token list — what the InlineChipEditor is
+  // showing. Diverges from the proposal's tokens when the user edits;
+  // re-syncs after the parent calls /preview-matches via the explicit
+  // "Evaluate" button.
+  const [draftTokens, setDraftTokens] = useState<Record<string, RuleToken[]>>({});
+  // Bumped whenever a Claude round-trip writes new tokens for a
+  // message. Used as the editor's `version` prop to remount its
+  // contenteditable spans with fresh DOM contents.
+  const [tokensVersion, setTokensVersion] = useState<Record<string, number>>({});
+  // Has the user clicked Evaluate on this message yet? Until they do,
+  // we hide IMPACTS / SAMPLES so the wizard pushes them to confirm
+  // the rule explicitly rather than reading numbers off an unprompted
+  // panel.
+  const [evaluated, setEvaluated] = useState<Record<string, boolean>>({});
   const [previewUpdating, setPreviewUpdating] = useState<Record<string, boolean>>({});
   const [applying, setApplying] = useState(false);
   const [failures, setFailures] = useState<Record<string, string>>({});
@@ -98,14 +118,30 @@ export function InboxCleanupWizard({ onClose }: { onClose: () => void }) {
         if (i >= queue.length) return;
         const mid = queue[i]!;
         if (proposals[mid] || failures[mid]) continue;
+        // Skip messages that got covered mid-session — when the user
+        // applied a rule earlier in this same session, sweeping
+        // matched messages into `covered`, we don't want to spend a
+        // Claude call on a proposal we'll never show.
+        if (covered.has(mid)) continue;
         try {
-          const p = await apiSend<CleanupProposal>(
+          const p = await apiSend<CleanupOutcome>(
             'POST',
             `/api/inbox-cleanup/session/${session.sessionId}/propose`,
             { messageId: mid },
           );
           if (aborted) return;
           setProposals((prev) => ({ ...prev, [mid]: p }));
+          // If the AI determined this email is already handled by an
+          // existing enabled rule, mark it covered so the wizard
+          // skips past it once the user advances.
+          if (p.outcome === 'covered') {
+            setCovered((prev) => {
+              if (prev.has(mid)) return prev;
+              const next = new Set(prev);
+              next.add(mid);
+              return next;
+            });
+          }
         } catch (err) {
           if (aborted) return;
           const msg = err instanceof Error ? err.message : String(err);
@@ -134,49 +170,98 @@ export function InboxCleanupWizard({ onClose }: { onClose: () => void }) {
       .catch(() => {});
   }, [session, queue, idx, emailPreviews]);
 
-  // ── Debounced preview-refresh when the user edits the NL ───────────
+  // ── Hydrate draft tokens whenever a fresh proposal lands ──────────
+  // The InlineChipEditor reads from draftTokens[mid]. When propose or
+  // evaluate returns a new ruleTokens array we copy it into
+  // draftTokens and bump the version so the editor remounts its
+  // contenteditable spans with fresh content.
   useEffect(() => {
-    if (!session) return;
-    const mid = queue[idx];
-    if (!mid) return;
-    const current = proposals[mid];
-    const draft = edits[mid];
-    if (!current || draft == null || draft === current.naturalLanguage) return;
+    for (const mid of Object.keys(proposals)) {
+      const p = proposals[mid];
+      if (!p || p.outcome !== 'propose') continue;
+      if (draftTokens[mid] == null && p.ruleTokens && p.ruleTokens.length > 0) {
+        setDraftTokens((prev) => ({ ...prev, [mid]: p.ruleTokens! }));
+        setTokensVersion((prev) => ({ ...prev, [mid]: (prev[mid] ?? 0) + 1 }));
+      }
+    }
+  }, [proposals]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Explicit Evaluate — the user clicks a button when they're ready
+  // for Claude to re-derive chips, actions, samples, and impact from
+  // the current token sequence.
+  //
+  // Fast path: if the user clicks Evaluate without having edited any
+  // chips since the proposer's first response, we already HAVE the
+  // matching impact/samples in the proposal — just flip `evaluated`
+  // to reveal them. No Claude round-trip on a fresh email.
+  async function evaluateCurrent(mid: string) {
+    if (!session) return;
+    const tokens = draftTokens[mid] ?? [];
+    const nl = tokensToNaturalLanguage(tokens);
+    if (!nl) return;
+    const outcome = proposals[mid];
+    if (outcome && outcome.outcome === 'covered') {
+      // Covered messages don't have a propose form to evaluate. Just
+      // mark evaluated and let the wizard advance.
+      setEvaluated((prev) => ({ ...prev, [mid]: true }));
+      return;
+    }
+    const proposal = outcome && outcome.outcome === 'propose' ? outcome : undefined;
+    const proposalTokensNL = proposal?.ruleTokens
+      ? tokensToNaturalLanguage(proposal.ruleTokens)
+      : null;
+    // Reveal cached impact when nothing changed.
+    if (proposal && proposalTokensNL != null && proposalTokensNL.trim() === nl.trim()) {
+      setEvaluated((prev) => ({ ...prev, [mid]: true }));
+      return;
+    }
+
+    setEdits((prev) => ({ ...prev, [mid]: nl }));
     setPreviewUpdating((prev) => ({ ...prev, [mid]: true }));
-    const t = setTimeout(() => {
-      void apiSend<CleanupPreview>(
+    try {
+      const res = await apiSend<CleanupPreview>(
         'POST',
         `/api/inbox-cleanup/session/${session.sessionId}/preview-matches`,
-        { naturalLanguage: draft, messageId: mid },
-      )
-        .then((res) => {
-          setProposals((prev) => ({
-            ...prev,
-            [mid]: {
-              ...(prev[mid] as CleanupProposal),
-              // Keep the user's exact text (don't jump underneath their cursor).
-              naturalLanguage: draft,
-              gmailQuery: res.gmailQuery,
-              // Crucial: actions now reflect the edited NL. Prevents the
-              // "NL says archive but action list doesn't include archive"
-              // desync that existed with the v1 preview-matches.
-              actions: res.actions,
-              samples: res.samples,
-              totals: res.totals,
-            },
-          }));
-        })
-        .catch(() => {})
-        .finally(() => setPreviewUpdating((prev) => ({ ...prev, [mid]: false })));
-    }, EDIT_DEBOUNCE_MS);
-    return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [edits, idx, queue, session?.sessionId]);
+        { naturalLanguage: nl, messageId: mid },
+      );
+      setProposals((prev) => {
+        const cur = prev[mid];
+        // Only patch a propose-shape proposal — covered ones don't
+        // expose the propose fields and shouldn't be reachable here.
+        if (!cur || cur.outcome !== 'propose') return prev;
+        return {
+          ...prev,
+          [mid]: {
+            ...cur,
+            naturalLanguage: res.naturalLanguage,
+            gmailQuery: res.gmailQuery,
+            actions: res.actions,
+            samples: res.samples,
+            totals: res.totals,
+            ruleTokens: res.ruleTokens ?? cur.ruleTokens,
+          },
+        };
+      });
+      if (res.ruleTokens && res.ruleTokens.length > 0) {
+        setDraftTokens((prev) => ({ ...prev, [mid]: res.ruleTokens! }));
+        setTokensVersion((prev) => ({ ...prev, [mid]: (prev[mid] ?? 0) + 1 }));
+      }
+      setEvaluated((prev) => ({ ...prev, [mid]: true }));
+    } catch {
+      /* errors surface via the failures map elsewhere */
+    } finally {
+      setPreviewUpdating((prev) => ({ ...prev, [mid]: false }));
+    }
+  }
 
   // ── Derived ────────────────────────────────────────────────────────
   const currentId = queue[idx] ?? null;
-  const currentProposal = currentId ? proposals[currentId] : undefined;
+  const currentOutcome = currentId ? proposals[currentId] : undefined;
+  // Two narrowed views — pick whichever the renderer needs.
+  const currentProposal: CleanupProposal | undefined =
+    currentOutcome?.outcome === 'propose' ? currentOutcome : undefined;
+  const currentCovered: CleanupCovered | undefined =
+    currentOutcome?.outcome === 'covered' ? currentOutcome : undefined;
   const currentPreview = currentId ? emailPreviews[currentId] : undefined;
   const currentEditText = currentId
     ? edits[currentId] ?? currentProposal?.naturalLanguage ?? ''
@@ -368,7 +453,7 @@ export function InboxCleanupWizard({ onClose }: { onClose: () => void }) {
         </div>
 
         {/* Proposal area */}
-        {!currentProposal && !currentFailed && (
+        {!currentOutcome && !currentFailed && (
           <div className="translate-pending" style={{ marginBottom: '0.6rem' }}>
             <span className="spinner" />
             <span>Proposing a rule for this email (propose → search → evaluate → refine)…</span>
@@ -380,35 +465,33 @@ export function InboxCleanupWizard({ onClose }: { onClose: () => void }) {
             next wizard open.
           </div>
         )}
+        {currentCovered && (
+          <CoveredCard
+            covered={currentCovered}
+            onSkip={() => skipCurrent()}
+          />
+        )}
         {currentProposal && session && currentId && (
           <ProposalBody
             proposal={currentProposal}
-            editText={currentEditText}
-            onEditChange={(v) => setEdits((prev) => ({ ...prev, [currentId]: v }))}
+            tokens={draftTokens[currentId] ?? currentProposal.ruleTokens ?? []}
+            tokensVersion={tokensVersion[currentId] ?? 0}
             updating={Boolean(previewUpdating[currentId])}
-            onActionsChange={(newActions) => {
-              setProposals((prev) => ({
-                ...prev,
-                [currentId]: {
-                  ...(prev[currentId] as CleanupProposal),
-                  actions: newActions,
-                },
-              }));
+            evaluated={Boolean(evaluated[currentId])}
+            dirty={Boolean(
+              draftTokens[currentId] &&
+                tokensToNaturalLanguage(draftTokens[currentId]!) !==
+                  currentProposal.naturalLanguage,
+            )}
+            onTokensChange={(next) => {
+              setDraftTokens((prev) => ({ ...prev, [currentId]: mergeAdjacentText(next) }));
+              // Edits invalidate the previous evaluation — hide
+              // impact until the user re-evaluates.
+              setEvaluated((prev) =>
+                prev[currentId] ? { ...prev, [currentId]: false } : prev,
+              );
             }}
-            onLabelRename={(oldLabel, newLabel) => {
-              // A chip edit changed the label path. Update the NL text to
-              // use the new path too — the server's reproposer will
-              // re-derive the full action list from the edited NL on the
-              // next debounced preview-matches tick. Plain substring
-              // replace is adequate for a name like "Marketing/LEGO" →
-              // "Notifications/LEGO"; the prompt tolerates minor tidying.
-              const current = edits[currentId] ?? currentProposal.naturalLanguage;
-              if (!current.includes(oldLabel)) return;
-              setEdits((prev) => ({
-                ...prev,
-                [currentId]: current.split(oldLabel).join(newLabel),
-              }));
-            }}
+            onEvaluate={() => evaluateCurrent(currentId)}
           />
         )}
 
@@ -418,39 +501,69 @@ export function InboxCleanupWizard({ onClose }: { onClose: () => void }) {
             ← Previous
           </button>
           <div className="row">
-            <button onClick={skipCurrent} disabled={applying}>
-              Skip
-            </button>
             <button
-              onClick={() => applyCurrent('save-only')}
-              disabled={applying || !currentProposal || !currentEditText.trim()}
-              title="Save the rule for future mail; leave the existing emails alone"
+              onClick={skipCurrent}
+              disabled={applying}
+              className={currentCovered ? 'primary' : ''}
             >
-              Save rule only
+              {currentCovered ? 'Next email →' : 'Skip'}
             </button>
-            <button
-              className="primary"
-              onClick={() => applyCurrent('inbox-only')}
-              disabled={applying || !currentProposal || !currentEditText.trim()}
-              title="Save rule and clean up emails currently in the inbox"
-            >
-              {applying
-                ? 'Applying…'
-                : `Save & clean inbox${
-                    currentProposal ? ` (${currentProposal.totals.inbox})` : ''
-                  }`}
-            </button>
-            <button
-              onClick={() => applyCurrent('all-mail')}
-              disabled={applying || !currentProposal || !currentEditText.trim()}
-              title="Save rule and apply to every matching email (including already-archived)"
-            >
-              {applying
-                ? ''
-                : `Save & apply to all${
-                    currentProposal ? ` (${currentProposal.totals.allMail})` : ''
-                  }`}
-            </button>
+            {!currentCovered && (
+              <>
+                <button
+                  onClick={() => applyCurrent('save-only')}
+                  disabled={applying || !currentProposal || !currentEditText.trim()}
+                  title="Save the rule for future mail; leave the existing emails alone"
+                >
+                  Save rule only
+                </button>
+                <button
+                  className="primary"
+                  onClick={() => applyCurrent('inbox-only')}
+                  disabled={
+                    applying ||
+                    !currentProposal ||
+                    !currentEditText.trim() ||
+                    !evaluated[currentId ?? '']
+                  }
+                  title={
+                    !evaluated[currentId ?? '']
+                      ? 'Click Evaluate first to see the impact before applying'
+                      : 'Save rule and clean up emails currently in the inbox'
+                  }
+                >
+                  {applying
+                    ? 'Applying…'
+                    : `Apply to inbox${
+                        currentProposal && evaluated[currentId ?? '']
+                          ? ` (${currentProposal.totals.inbox})`
+                          : ''
+                      }`}
+                </button>
+                <button
+                  onClick={() => applyCurrent('all-mail')}
+                  disabled={
+                    applying ||
+                    !currentProposal ||
+                    !currentEditText.trim() ||
+                    !evaluated[currentId ?? '']
+                  }
+                  title={
+                    !evaluated[currentId ?? '']
+                      ? 'Click Evaluate first to see the impact before applying'
+                      : 'Save rule and apply to every matching email (including already-archived)'
+                  }
+                >
+                  {applying
+                    ? ''
+                    : `Apply to all emails${
+                        currentProposal && evaluated[currentId ?? '']
+                          ? ` (${currentProposal.totals.allMail})`
+                          : ''
+                      }`}
+                </button>
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -458,34 +571,77 @@ export function InboxCleanupWizard({ onClose }: { onClose: () => void }) {
   );
 }
 
+/**
+ * Renders when the AI determined this email is already handled by an
+ * existing enabled rule. Skips the rule-editor + impact panel
+ * entirely; the user can hit "Next email →" (the relabeled Skip
+ * button in the wizard footer) to advance.
+ */
+function CoveredCard({
+  covered,
+  onSkip,
+}: {
+  covered: CleanupCovered;
+  onSkip: () => void;
+}) {
+  return (
+    <div
+      className="rule-preview"
+      style={{
+        marginBottom: '0.5rem',
+        borderColor: 'var(--accent)',
+      }}
+    >
+      <div className="rule-preview-row">
+        <span className="rule-preview-label">Already handled</span>
+        <span style={{ fontSize: '0.9rem' }}>
+          ✓ This email matches an existing rule — no new rule needed.
+        </span>
+      </div>
+      <div className="rule-preview-row">
+        <span className="rule-preview-label">Existing rule</span>
+        <span style={{ fontSize: '0.85rem', fontStyle: 'italic' }}>
+          "{covered.ruleNL}"
+        </span>
+      </div>
+      <div className="rule-preview-row">
+        <span className="rule-preview-label">Why it matches</span>
+        <span className="muted" style={{ fontSize: '0.82rem' }}>
+          {covered.reasoning}
+        </span>
+      </div>
+      <div className="row" style={{ marginTop: '0.4rem' }}>
+        <button className="primary" onClick={onSkip}>
+          Next email →
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function ProposalBody({
   proposal,
-  editText,
-  onEditChange,
+  tokens,
+  tokensVersion,
   updating,
-  onActionsChange,
-  onLabelRename,
+  evaluated,
+  dirty,
+  onTokensChange,
+  onEvaluate,
 }: {
   proposal: CleanupProposal;
-  editText: string;
-  onEditChange: (v: string) => void;
+  tokens: RuleToken[];
+  tokensVersion: number;
   updating: boolean;
-  /** Called when the user edits an action chip. Parent updates the
-   *  actions array immediately; the debounced reproposer will also fire
-   *  on the follow-on NL edit and produce a consistent list. */
-  onActionsChange: (next: Action[]) => void;
-  /** Called when a label chip changed its labelName. Parent rewrites
-   *  the NL to use the new path so the action list and the NL stay
-   *  aligned (and so the schema-level refineLabelsAreNamedInNL on the
-   *  next repropose doesn't reject the draft). */
-  onLabelRename: (oldLabel: string, newLabel: string) => void;
+  /** True after the user has clicked Evaluate at least once for this
+   *  email AND no edits have happened since. Drives whether the
+   *  IMPACTS / SAMPLE EMAILS panels render. */
+  evaluated: boolean;
+  /** True when the user has edited tokens since the last evaluate. */
+  dirty: boolean;
+  onTokensChange: (next: RuleToken[]) => void;
+  onEvaluate: () => void;
 }) {
-  // Layout mirrors RuleEditor (apps/web/src/pages/Home.tsx): label →
-  // textarea → description → preview → check-rule. The differences from
-  // a blank RuleEditor are (1) the textarea is seeded from the
-  // server-side propose loop, (2) actions render live and editable
-  // (from the propose/repropose response) rather than waiting for a
-  // Check-rule click, and (3) the Matches block is specific to cleanup.
   return (
     <>
       <label
@@ -494,85 +650,115 @@ function ProposalBody({
           fontSize: '0.7rem',
           textTransform: 'uppercase',
           letterSpacing: '0.05em',
+          display: 'block',
+          marginBottom: '0.35rem',
         }}
       >
-        AI rule
+        Suggested AI rule
       </label>
-      <textarea
-        value={editText}
-        onChange={(e) => onEditChange(e.target.value)}
-        rows={3}
-        spellCheck={false}
-        style={{ marginBottom: '0.35rem' }}
+
+      <InlineChipEditor
+        tokens={tokens}
+        version={tokensVersion}
+        evaluating={updating}
+        onTokensChange={onTokensChange}
       />
-      <div className="muted" style={{ fontSize: '0.75rem', marginBottom: '0.6rem' }}>
-        Drafted from this email. Edit freely — actions and matches update as you type.
-        {proposal.refineHistory.length > 0 && (
-          <span
-            title={proposal.refineHistory.map((h) => `${h.attempt}: ${h.note}`).join('\n')}
-            style={{ marginLeft: '0.4rem' }}
-          >
-            · auto-refined {proposal.refineHistory.length}×
-          </span>
-        )}
-      </div>
-
-      {/* Live "what it will do" — same .rule-preview styling as RuleEditor's
-          analyze output, but driven by the propose/repropose response so the
-          chips match the rule that will actually run. Each chip is an
-          inline editor: click the label chip to change the canonical
-          category, click the archive chip to change timing. */}
-      <div className="rule-preview" style={{ marginBottom: '0.5rem' }}>
-        <div className="rule-preview-row">
-          <span className="rule-preview-label">Actions</span>
-          <div className="row wrap" style={{ gap: '0.3rem', alignItems: 'center' }}>
-            {proposal.actions.map((a, i) => (
-              <EditableActionChip
-                key={`${i}-${chipKey(a)}`}
-                action={a}
-                onChange={(next) => {
-                  const copy = proposal.actions.slice();
-                  copy[i] = next;
-                  onActionsChange(copy);
-                }}
-                onLabelRename={onLabelRename}
-              />
-            ))}
-            {updating && (
-              <span className="muted" style={{ fontSize: '0.78rem' }}>
-                · updating…
-              </span>
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* Warnings + Suggested phrasing come from /api/rules/analyze; its
-          action chips are suppressed (hideActions) so we don't show two
-          disagreeing action lists on the same page. */}
-      <RuleCheckPanel nl={editText} onAcceptRewrite={(s) => onEditChange(s)} hideActions />
 
       <div
-        className="muted"
-        style={{ fontSize: '0.82rem', marginTop: '0.8rem', marginBottom: '0.3rem' }}
+        className="row"
+        style={{
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          marginTop: '0.5rem',
+          marginBottom: '0.6rem',
+          gap: '0.5rem',
+        }}
       >
-        Matches — in inbox: <strong>{proposal.totals.inbox}</strong> · all mail:{' '}
-        <strong>{proposal.totals.allMail}</strong>
-        {updating && (
-          <>
-            {' · '}
-            <span className="spinner" style={{ display: 'inline-block', verticalAlign: 'middle' }} />
-            <span style={{ marginLeft: '0.35rem' }}>updating…</span>
-          </>
-        )}
+        <div className="muted" style={{ fontSize: '0.75rem', flex: 1 }}>
+          Type freely between chips, click a chip to edit it. Click{' '}
+          <strong>Evaluate</strong> to ask AI to refresh the chips and the
+          impact below.
+          {proposal.refineHistory.length > 0 && (
+            <span
+              title={proposal.refineHistory.map((h) => `${h.attempt}: ${h.note}`).join('\n')}
+              style={{ marginLeft: '0.4rem' }}
+            >
+              · auto-refined {proposal.refineHistory.length}×
+            </span>
+          )}
+        </div>
+        <button
+          type="button"
+          className={!evaluated || dirty ? 'primary' : ''}
+          onClick={onEvaluate}
+          disabled={updating}
+          title={
+            !evaluated
+              ? 'Reveal what this rule will do and which emails it hits'
+              : dirty
+                ? 'Re-run AI to refresh chips, actions, and impact'
+                : 'Up to date'
+          }
+        >
+          {updating ? 'Evaluating…' : evaluated && !dirty ? '✓ Evaluated' : 'Evaluate'}
+        </button>
       </div>
 
-      <SampleList samples={proposal.samples} />
+      {evaluated ? (
+        <div className="rule-preview" style={{ marginBottom: '0.5rem' }}>
+          <div className="rule-preview-row">
+            <span className="rule-preview-label">Impacts</span>
+            <span style={{ fontSize: '0.85rem' }}>
+              <strong>{proposal.totals.inbox}</strong> in inbox ·{' '}
+              <strong>{proposal.totals.allMail}</strong> across all mail
+              {updating && (
+                <>
+                  {' · '}
+                  <span
+                    className="spinner"
+                    style={{ display: 'inline-block', verticalAlign: 'middle' }}
+                  />
+                  <span style={{ marginLeft: '0.35rem' }}>updating…</span>
+                </>
+              )}
+            </span>
+          </div>
+
+          <div className="rule-preview-row">
+            <span className="rule-preview-label">Sample emails</span>
+            <GroupedSampleList samples={proposal.samples} />
+          </div>
+        </div>
+      ) : (
+        <div
+          className="empty"
+          style={{
+            padding: '0.85rem 1rem',
+            fontSize: '0.85rem',
+            marginBottom: '0.5rem',
+          }}
+        >
+          {dirty
+            ? 'Rule edited — click Evaluate to refresh the impact.'
+            : 'Click Evaluate to see what this rule will do and which emails it will hit.'}
+        </div>
+      )}
+
+      {/* Note: the legacy RuleCheckPanel (warnings + rephrase suggestions
+          from /api/rules/analyze) was useful when the rule lived in a
+          free-form textarea. With the chip composer driving the rule's
+          structure, ambiguity-class warnings don't apply — what you see
+          in the chips is what runs. The panel was removed; if a future
+          warning class shows up that's chip-relevant we can reintroduce
+          a leaner indicator inline. */}
     </>
   );
 }
 
-function SampleList({ samples }: { samples: CleanupSample[] }) {
+/** Two short bulleted lists: one for emails currently in the inbox,
+ *  one for matches outside it (already archived, sent, etc.). Helps
+ *  the user understand "Apply to inbox" vs "Apply to all emails". */
+function GroupedSampleList({ samples }: { samples: CleanupSample[] }) {
   if (samples.length === 0) {
     return (
       <div className="muted" style={{ fontSize: '0.78rem' }}>
@@ -580,6 +766,47 @@ function SampleList({ samples }: { samples: CleanupSample[] }) {
       </div>
     );
   }
+  const inInbox = samples.filter((s) => s.inInbox);
+  const outside = samples.filter((s) => !s.inInbox);
+  return (
+    <div style={{ width: '100%' }}>
+      {inInbox.length > 0 && (
+        <div style={{ marginBottom: outside.length > 0 ? '0.5rem' : 0 }}>
+          <div
+            className="muted"
+            style={{
+              fontSize: '0.7rem',
+              textTransform: 'uppercase',
+              letterSpacing: '0.05em',
+              marginBottom: '0.2rem',
+            }}
+          >
+            In inbox ({inInbox.length})
+          </div>
+          <SampleRows rows={inInbox} />
+        </div>
+      )}
+      {outside.length > 0 && (
+        <div>
+          <div
+            className="muted"
+            style={{
+              fontSize: '0.7rem',
+              textTransform: 'uppercase',
+              letterSpacing: '0.05em',
+              marginBottom: '0.2rem',
+            }}
+          >
+            Other matches ({outside.length})
+          </div>
+          <SampleRows rows={outside} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SampleRows({ rows }: { rows: CleanupSample[] }) {
   return (
     <ul
       style={{
@@ -590,13 +817,12 @@ function SampleList({ samples }: { samples: CleanupSample[] }) {
         overflowY: 'auto',
       }}
     >
-      {samples.map((s) => (
+      {rows.map((s) => (
         <li key={s.messageId} style={{ lineHeight: 1.35 }}>
-          <span style={{ marginRight: '0.35rem' }}>{s.inInbox ? '●' : '○'}</span>
           <strong>{s.from ?? '(unknown sender)'}</strong>
           {s.subject && <> — {s.subject}</>}
           {s.snippet && (
-            <div className="muted" style={{ fontSize: '0.75rem', paddingLeft: '1.1rem' }}>
+            <div className="muted" style={{ fontSize: '0.75rem', paddingLeft: '0.4rem' }}>
               {s.snippet.slice(0, 140)}
             </div>
           )}

@@ -14,6 +14,13 @@ export type LabelSample = {
   from: string | null;
   subject: string | null;
   snippet: string | null;
+  /** When the email arrived via a mailing list / Google Group, the
+   *  visible `from` is the list address (rewritten). The real sender
+   *  lives here. The taxonomy classifier prefers `originalFrom`
+   *  for clustering when present so list-routed Apple mail clusters
+   *  under "Apple", not "the list address". */
+  originalFrom?: string | null;
+  listId?: string | null;
 };
 
 export type LabelRecommendation = {
@@ -175,15 +182,46 @@ async function fetchSamplesByQuery(userId: string, q: string): Promise<LabelSamp
         userId: 'me',
         id,
         format: 'metadata',
-        metadataHeaders: ['From', 'Subject'],
+        metadataHeaders: [
+          'From',
+          'Subject',
+          'List-ID',
+          'List-Id',
+          'Reply-To',
+          'Sender',
+          'X-Original-From',
+          'X-Google-Original-From',
+        ],
       });
       const headers = res.data.payload?.headers ?? [];
       const h = (name: string) =>
         headers.find((x) => x.name?.toLowerCase() === name.toLowerCase())?.value ?? null;
+      const listIdRaw = h('List-ID') ?? h('List-Id');
+      const listId = listIdRaw
+        ? (/<([^>]+)>/.exec(listIdRaw)?.[1] ?? listIdRaw).trim().toLowerCase()
+        : null;
+      const fromHeader = h('From');
+      const originalCandidate =
+        h('X-Original-From') ?? h('X-Google-Original-From') ?? h('Reply-To') ?? h('Sender');
+      const originalFrom =
+        originalCandidate &&
+        // only meaningful when it differs from the visible From
+        (() => {
+          const norm = (s: string | null): string | null => {
+            if (!s) return null;
+            const m = /<([^>]+)>/.exec(s);
+            return (m && m[1] ? m[1] : s).trim().toLowerCase();
+          };
+          return norm(originalCandidate) !== norm(fromHeader);
+        })()
+          ? originalCandidate
+          : null;
       return {
-        from: h('From'),
+        from: fromHeader,
         subject: h('Subject'),
         snippet: res.data.snippet ?? null,
+        originalFrom,
+        listId,
       };
     });
   } catch (err) {
@@ -229,10 +267,21 @@ function buildPrompt({
       ? '(no samples available)'
       : samples
           .slice(0, SAMPLE_LIMIT)
-          .map(
-            (s, i) =>
-              `${i + 1}. From: ${s.from ?? '?'}\n   Subject: ${s.subject ?? '?'}\n   Snippet: ${(s.snippet ?? '').slice(0, 160)}`,
-          )
+          .map((s, i) => {
+            // When the email arrived via a list / Google Group, the
+            // visible From was rewritten (e.g. "'Apple' via Zeligs
+            // <list@…>"). Surface the originalFrom + listId so the
+            // taxonomy classifier picks the brand from the real
+            // sender rather than the list rewrite.
+            const lines = [
+              `${i + 1}. From: ${s.from ?? '?'}`,
+              s.originalFrom ? `   Original sender: ${s.originalFrom}` : null,
+              s.listId ? `   Via list: ${s.listId}` : null,
+              `   Subject: ${s.subject ?? '?'}`,
+              `   Snippet: ${(s.snippet ?? '').slice(0, 160)}`,
+            ].filter(Boolean);
+            return lines.join('\n');
+          })
           .join('\n');
 
   return `You're categorizing a Gmail filter into a canonical label taxonomy for a mail-cleanup tool.
@@ -265,7 +314,12 @@ Rules:
   "Nike"), reuse that name as placeholderFilled unless the samples clearly
   contradict it.
 - "skip" is for filters where no category cleanly applies.
-- Only use slugs listed above. Do NOT invent new slugs.`;
+- Only use slugs listed above. Do NOT invent new slugs.
+- MAILING LISTS: when a sample includes "Original sender" / "Via list",
+  the visible From is the LIST address (rewritten by Google Groups /
+  Mailman / etc.). Cluster by the brand of the ORIGINAL sender, not
+  the list — e.g. "Apple via Zeligs" forwarding insideapple.apple.com
+  emails belongs in "Marketing/Apple", not "Marketing/Zeligs".`;
 }
 
 function safeJson<T>(s: string, fallback: T): T {

@@ -20,8 +20,10 @@ import { modelsRouter } from './routes/models.js';
 import { gmailFiltersRouter } from './routes/gmail-filters.js';
 import { inboxCleanupRouter } from './routes/inbox-cleanup.js';
 import { agentActionsRouter } from './routes/agent-actions.js';
+import { chatRouter } from './routes/chat.js';
 import { startScheduler } from './jobs/scheduler.js';
 import { startMemoryConsolidator } from './jobs/memory-consolidator.js';
+import { startEmbeddingsIndexer } from './embeddings/indexer.js';
 import { startPoller } from './gmail/poll.js';
 
 const app = express();
@@ -62,6 +64,7 @@ app.use('/api/models', modelsRouter);
 app.use('/api/gmail-filters', gmailFiltersRouter);
 app.use('/api/inbox-cleanup', inboxCleanupRouter);
 app.use('/api/agent-actions', agentActionsRouter);
+app.use('/api/chat', chatRouter);
 
 if (env.NODE_ENV === 'production') {
   const here = path.dirname(fileURLToPath(import.meta.url));
@@ -83,4 +86,5 @@ app.listen(env.PORT, () => {
   startScheduler();
   startPoller();
   startMemoryConsolidator();
+  startEmbeddingsIndexer();
 });
