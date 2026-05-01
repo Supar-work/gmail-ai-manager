@@ -3,8 +3,8 @@ import { Router, type Router as RouterT } from 'express';
 import { env } from '../env.js';
 import { prisma } from '../db/client.js';
 import { buildAuthUrl, exchangeCode, fetchUserInfo } from '../auth/google.js';
-import { encrypt } from '../auth/crypto.js';
-import { clearSession, setSession } from '../auth/session.js';
+import { decrypt, encrypt } from '../auth/crypto.js';
+import { clearSession, readSession, setSession } from '../auth/session.js';
 import { logger } from '../logger.js';
 
 export const authRouter: RouterT = Router();
@@ -107,10 +107,6 @@ authRouter.post('/logout', (_req, res) => {
 // the current access token to a stale view of the user's settings (e.g. a
 // filters.list endpoint that returns 204 despite filters existing).
 authRouter.post('/reconnect', async (req, res) => {
-  const { prisma } = await import('../db/client.js');
-  const { readSession } = await import('../auth/session.js');
-  const { decrypt } = await import('../auth/crypto.js');
-
   const userId = readSession(req);
   if (userId) {
     const user = await prisma.user.findUnique({

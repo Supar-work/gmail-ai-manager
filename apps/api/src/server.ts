@@ -55,10 +55,15 @@ if (env.NODE_ENV !== 'production') {
     }),
   );
 }
-// 10mb gives plenty of headroom for full-DB backup imports (a typical
-// user's rules + GmailFilter mirror is well under 1mb, but originalFilterJson
-// blobs can balloon for heavy Gmail users).
-app.use(express.json({ limit: '10mb' }));
+// Tight body limit on every route (most accept small JSON payloads), with
+// the single exception of /api/backups/import which can carry a full DB
+// snapshot — originalFilterJson blobs balloon on heavy Gmail users.
+const smallJson = express.json({ limit: '100kb' });
+const bigJson = express.json({ limit: '10mb' });
+app.use((req, res, next) => {
+  if (req.path === '/api/backups/import') return bigJson(req, res, next);
+  return smallJson(req, res, next);
+});
 
 app.get('/healthz', (_req, res) => {
   res.json({ ok: true });
@@ -79,6 +84,14 @@ app.use('/api/gmail-filters', gmailFiltersRouter);
 app.use('/api/inbox-cleanup', inboxCleanupRouter);
 app.use('/api/agent-actions', agentActionsRouter);
 app.use('/api/control', controlRouter);
+
+// JSON 404 for unmatched API/auth/me routes. Without this, prod falls
+// through to the SPA fallback below (returning HTML for an API miss),
+// and dev returns Express's default HTML 404. Either way the client
+// can't distinguish "route doesn't exist" from "auth/server error".
+app.use(/^\/(api|auth|me)(\/|$)/, (_req, res) => {
+  res.status(404).json({ error: 'not_found' });
+});
 
 if (env.NODE_ENV === 'production') {
   const here = path.dirname(fileURLToPath(import.meta.url));
