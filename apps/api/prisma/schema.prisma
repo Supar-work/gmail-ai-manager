@@ -53,6 +53,52 @@ model User {
   inboxMessages       InboxMessage[]
   gmailFilters        GmailFilter[]
   agentActions        AgentAction[]
+  chatThreads         ChatThread[]
+  chatMessages        ChatMessage[]
+  messageEmbeddings   MessageEmbedding[]
+}
+
+// ── Chat surface ────────────────────────────────────────────────────────
+// One ChatThread per logical conversation; the chat tab can show a list
+// and let the user start new threads. Messages are append-only and
+// persist across restarts (one of the things we beat open-poke at).
+
+model ChatThread {
+  id        String   @id @default(cuid())
+  userId    String
+  // First-message-derived title; null until we summarise the thread.
+  title     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user     User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages ChatMessage[]
+
+  @@index([userId, updatedAt])
+}
+
+model ChatMessage {
+  id        String   @id @default(cuid())
+  threadId  String
+  userId    String
+  // "user" | "assistant" | "system" — same shape as Anthropic's messages API
+  role      String
+  // Plain-text body (assistant turns may be partial; SSE delivers tokens).
+  content   String
+  // When the message includes tool_use / tool_result blocks, the structured
+  // payload lives here as JSON. Frontend renders a collapsible trail.
+  toolEventsJson String?
+  // Status of an assistant turn. user messages are always 'done'.
+  status    String   @default("done")
+  // Free-form persona ("coordinator" today; specialists in M6).
+  persona   String?
+  createdAt DateTime @default(now())
+
+  thread ChatThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  user   User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([threadId, createdAt])
+  @@index([userId, createdAt])
 }
 
 // One row per Gmail-mutating (or rule/schedule-mutating) tool call.
@@ -161,6 +207,25 @@ model InboxMessage {
   labelIds       String    @default("[]") // JSON-encoded string[]
   dateHeader     String?
   internalDate   DateTime?
+  // Mailing-list awareness. Captured at sync time from the message
+  // headers (List-Id, Reply-To, Sender, Precedence, Mailing-list,
+  // X-Original-From). When the email arrived via a mailing list /
+  // Google Group / etc., the visible `fromHeader` is often rewritten
+  // (e.g. "'Apple' via Zeligs <list@…>") and the real sender lives in
+  // `originalFromHeader`. The proposer + classifier are passed both,
+  // and prefer the `list:` Gmail operator when matching list mail.
+  // Bare List-ID value, with surrounding `<>` stripped. e.g. "zelig.zelig.me".
+  listId               String?
+  // Mailto address that List-Post points at, if present.
+  listPost             String?
+  // First mailto / URL in List-Unsubscribe, if present.
+  listUnsubscribe      String?
+  // Real sender behind a list rewrite — pulled from Reply-To / Sender
+  // / X-Original-From / X-Google-Original-From when those disagree
+  // with the visible From. Null when From is already the original.
+  originalFromHeader   String?
+  // Precedence header: 'list' / 'bulk' / 'junk' / etc.
+  precedence           String?
   fetchedAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 
@@ -168,6 +233,30 @@ model InboxMessage {
 
   @@unique([userId, gmailMessageId])
   @@index([userId, internalDate])
+  @@index([userId, listId])
+}
+
+// Local embedding vectors for the user's inbox. Powers
+// inbox.semanticSearch + inbox.similar MCP tools used by the searcher
+// specialist. One row per InboxMessage; we re-embed when contentHash
+// changes (subject/snippet/body diff).
+model MessageEmbedding {
+  id             String   @id @default(cuid())
+  userId         String
+  gmailMessageId String
+  // f32 vector serialised; default model dim is 384 (MiniLM-L6-v2).
+  embedding      Bytes
+  // sha256 of the encoded text — lets the indexer skip work on unchanged rows.
+  contentHash    String
+  // Guard against stale embeddings if we swap models later.
+  modelVersion   String
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, gmailMessageId])
+  @@index([userId, modelVersion])
 }
 
 model ClassifyRun {

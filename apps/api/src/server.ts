@@ -21,9 +21,11 @@ import { gmailFiltersRouter } from './routes/gmail-filters.js';
 import { inboxCleanupRouter } from './routes/inbox-cleanup.js';
 import { agentActionsRouter } from './routes/agent-actions.js';
 import { controlRouter } from './routes/control.js';
+import { chatRouter } from './routes/chat.js';
 import { startScheduler } from './jobs/scheduler.js';
 import { startMemoryConsolidator } from './jobs/memory-consolidator.js';
 import { startPruner } from './jobs/pruner.js';
+import { startEmbeddingsIndexer } from './embeddings/indexer.js';
 import { startPoller } from './gmail/poll.js';
 import { localOnly } from './middleware/local-only.js';
 import { runClaudePreflight } from './claude/preflight.js';
@@ -84,6 +86,7 @@ app.use('/api/gmail-filters', gmailFiltersRouter);
 app.use('/api/inbox-cleanup', inboxCleanupRouter);
 app.use('/api/agent-actions', agentActionsRouter);
 app.use('/api/control', controlRouter);
+app.use('/api/chat', chatRouter);
 
 // JSON 404 for unmatched API/auth/me routes. Without this, prod falls
 // through to the SPA fallback below (returning HTML for an API miss),
@@ -121,4 +124,5 @@ app.listen(env.PORT, '127.0.0.1', () => {
   startPoller();
   startMemoryConsolidator();
   startPruner();
+  startEmbeddingsIndexer();
 });

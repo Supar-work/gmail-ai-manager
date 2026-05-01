@@ -26,6 +26,7 @@ import { registerRulesReadTools } from './tools/rules.js';
 import { registerDecisionsReadTools } from './tools/decisions.js';
 import { registerAgentActionsReadTools } from './tools/agent-actions.js';
 import { registerAllWriteTools } from './tools/write.js';
+import { registerSemanticSearchTools } from './tools/semantic-search.js';
 import { logger } from '../logger.js';
 
 export type ToolDefinition<I = unknown> = {
@@ -64,8 +65,30 @@ async function main(): Promise<void> {
   registerRulesReadTools();
   registerDecisionsReadTools();
   registerAgentActionsReadTools();
+  registerSemanticSearchTools();
   if (process.env.GAM_MCP_ENABLE_WRITE === '1') {
     registerAllWriteTools();
+  }
+  // Coordinator-only: register the agent.delegate tool. The chat agent
+  // runner sets GAM_MCP_ENABLE_DELEGATE=1 only on the coordinator's MCP
+  // child; delegated specialists run with this off so a specialist
+  // can't recursively delegate.
+  if (process.env.GAM_MCP_ENABLE_DELEGATE === '1') {
+    const { registerDelegateTool } = await import('./tools/delegate.js');
+    registerDelegateTool();
+  }
+
+  // Optional allowlist: when GAM_MCP_TOOL_ALLOWLIST is set
+  // (comma-separated tool names) we drop everything outside it. This
+  // is how specialist subagents get a curated tool surface — the
+  // delegate tool spawns a fresh MCP child with the allowlist set to
+  // the specialist's own list.
+  const allowlistRaw = process.env.GAM_MCP_TOOL_ALLOWLIST;
+  if (allowlistRaw && allowlistRaw.trim().length > 0) {
+    const allowed = new Set(allowlistRaw.split(',').map((s) => s.trim()).filter(Boolean));
+    for (const name of Array.from(tools.keys())) {
+      if (!allowed.has(name)) tools.delete(name);
+    }
   }
 
   const server = new Server(

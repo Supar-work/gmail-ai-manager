@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { apiGet, apiSend, ApiError } from '../lib/api.js';
@@ -61,6 +61,8 @@ export function Settings() {
       <SyncFrequencySection />
       <AiGuidanceSection />
       <ForwardAllowlistSection />
+      <RuleMaintenanceSection />
+      <CleanupCacheSection />
       <AuditLogSection />
       <BackupRestoreSection />
       <RunHistorySection onOpen={setViewingRunId} />
@@ -237,7 +239,7 @@ type ExportPayload = {
 
 type AgentActionRow = {
   id: string;
-  source: 'rule' | 'schedule' | 'cleanup' | 'chat' | 'consolidator';
+  source: 'rule' | 'schedule' | 'cleanup' | 'chat' | 'consolidator' | 'maintenance';
   sourceId: string | null;
   targetType: 'gmailMessage' | 'gmailLabel' | 'rule' | 'scheduledAction';
   targetId: string;
@@ -255,6 +257,740 @@ type AgentActionsResponse = {
   rows: AgentActionRow[];
   nextCursor: string | null;
 };
+
+// ── cleanup cache reset ─────────────────────────────────────────────────
+
+/**
+ * Drops the inbox-cleanup wizard's in-memory caches (proposalCache,
+ * previewCache, recommendCache) for THIS user only. Use after
+ * tweaking AI guidance or when proposed rules look stale — the next
+ * wizard run will hit Claude fresh for every email.
+ */
+// ── rule maintenance ────────────────────────────────────────────────────
+
+type RecommendationKind =
+  | 'merge'
+  | 'sharpen'
+  | 'simplify'
+  | 'list_aware'
+  | 'disable'
+  | 'split';
+
+type ProposedRule = {
+  naturalLanguage: string;
+  actions: Array<Record<string, unknown>>;
+};
+
+type Recommendation = {
+  kind: RecommendationKind;
+  affectedRuleIds: string[];
+  rationale: string;
+  confidence: number;
+  proposed?: ProposedRule[];
+};
+
+type AnalyzeResponse = { recommendations: Recommendation[] };
+
+type RulesResponse = {
+  rules: Array<{ id: string; naturalLanguage: string; enabled: boolean; position: number }>;
+};
+
+const KIND_LABELS: Record<RecommendationKind, string> = {
+  merge: 'Merge',
+  sharpen: 'Sharpen',
+  simplify: 'Simplify',
+  list_aware: 'Use list:',
+  disable: 'Disable',
+  split: 'Split',
+};
+
+const KIND_HINTS: Record<RecommendationKind, string> = {
+  merge: 'Two or more rules describe the same class — collapse into one.',
+  sharpen: 'Rule fires too broadly — narrow the predicate.',
+  simplify: 'Rewrite the rule in clearer English without changing meaning.',
+  list_aware: 'Rule keys off a list-rewritten From; switch to list:<id>.',
+  disable: "Rule hasn't matched anything recently — turn it off.",
+  split: 'Rule conflates two distinct intents — split into separate rules.',
+};
+
+/**
+ * Settings → Rule maintenance. One-shot button that asks Claude to
+ * audit every rule + its match history + reversal history, returning
+ * concrete edits. Each recommendation is reviewable and applies in a
+ * single click; every apply writes to the AgentAction audit log
+ * under source='maintenance' for auditability.
+ */
+function RuleMaintenanceSection() {
+  const qc = useQueryClient();
+  const [recs, setRecs] = useState<Recommendation[]>([]);
+  const [hidden, setHidden] = useState<Set<number>>(new Set());
+
+  const rules = useQuery<RulesResponse>({
+    queryKey: ['rules'],
+    queryFn: () => apiGet('/api/rules'),
+    retry: false,
+  });
+  const ruleById = new Map(
+    (rules.data?.rules ?? []).map((r) => [r.id, r] as const),
+  );
+
+  const analyze = useMutation<AnalyzeResponse>({
+    mutationFn: () => apiSend('POST', '/api/settings/rule-maintenance/analyze'),
+    onSuccess: (res) => {
+      setRecs(res.recommendations);
+      setHidden(new Set());
+    },
+  });
+
+  const applyRec = useMutation<unknown, Error, { idx: number; rec: Recommendation }>({
+    mutationFn: ({ rec }) =>
+      apiSend('POST', '/api/settings/rule-maintenance/apply', { recommendation: rec }),
+    onSuccess: (_res, vars) => {
+      setHidden((prev) => {
+        const next = new Set(prev);
+        next.add(vars.idx);
+        return next;
+      });
+      qc.invalidateQueries({ queryKey: ['rules'] });
+      qc.invalidateQueries({ queryKey: ['agent-actions'] });
+    },
+  });
+
+  return (
+    <section className="settings-section">
+      <h2>Rule maintenance</h2>
+      <p className="muted" style={{ fontSize: '0.85rem' }}>
+        Ask AI to audit your rules + the last 30 days of decisions and reversals,
+        then recommend merges, sharpens, simplifications, list-aware rewrites,
+        and disables. Each suggestion can be reviewed and applied individually —
+        every apply lands in the audit log under <code>source=maintenance</code>.
+      </p>
+      <div className="row" style={{ gap: '0.5rem', marginTop: '0.5rem' }}>
+        <button
+          onClick={() => analyze.mutate()}
+          disabled={analyze.isPending}
+          className={recs.length === 0 ? 'primary' : ''}
+        >
+          {analyze.isPending ? 'Analyzing…' : recs.length === 0 ? 'Analyze rules' : 'Re-analyze'}
+        </button>
+        {analyze.isSuccess && recs.length === 0 && (
+          <span className="muted" style={{ fontSize: '0.85rem' }}>
+            No recommendations — your rules look clean.
+          </span>
+        )}
+        {analyze.isError && (
+          <span className="error" style={{ fontSize: '0.85rem' }}>
+            Failed: {(analyze.error as Error).message}
+          </span>
+        )}
+      </div>
+
+      {recs.length > 0 && (
+        <div className="rec-list" style={{ marginTop: '0.75rem' }}>
+          {recs.map((r, i) =>
+            hidden.has(i) ? null : (
+              <RecommendationCard
+                key={`${r.kind}-${i}`}
+                rec={r}
+                ruleById={ruleById}
+                onApply={(rec) => applyRec.mutate({ idx: i, rec })}
+                onSkip={() =>
+                  setHidden((prev) => {
+                    const next = new Set(prev);
+                    next.add(i);
+                    return next;
+                  })
+                }
+                applying={applyRec.isPending && applyRec.variables?.idx === i}
+                applyError={
+                  applyRec.isError && applyRec.variables?.idx === i
+                    ? (applyRec.error as Error).message
+                    : null
+                }
+              />
+            ),
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function RecommendationCard({
+  rec,
+  ruleById,
+  onApply,
+  onSkip,
+  applying,
+  applyError,
+}: {
+  rec: Recommendation;
+  ruleById: Map<string, { id: string; naturalLanguage: string; enabled: boolean }>;
+  /** Receives the (possibly user-edited) recommendation to apply.
+   *  For DISABLE we let the user uncheck specific rules, so the
+   *  applied list may be a subset of `rec.affectedRuleIds`. */
+  onApply: (rec: Recommendation) => void;
+  onSkip: () => void;
+  applying: boolean;
+  applyError: string | null;
+}) {
+  const qc = useQueryClient();
+
+  // Per-rule selection state for kinds that support partial apply
+  // (currently only DISABLE — merge/split/etc. are atomic).
+  const [selected, setSelected] = useState<Set<string>>(
+    () => new Set(rec.affectedRuleIds),
+  );
+  const allSelected = selected.size === rec.affectedRuleIds.length;
+  const noneSelected = selected.size === 0;
+  const toggle = (id: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  const toggleAll = () =>
+    setSelected(allSelected ? new Set() : new Set(rec.affectedRuleIds));
+
+  // Live edits to the proposed (AFTER) rules — pencil-icon edits land
+  // here and flow into Apply via `finalRec.proposed`. Null = unchanged.
+  const [editedProposed, setEditedProposed] = useState<ProposedRule[] | null>(null);
+  const proposedLive = editedProposed ?? rec.proposed ?? [];
+  const onEditProposed = (idx: number, naturalLanguage: string) => {
+    const base = editedProposed ?? rec.proposed ?? [];
+    setEditedProposed(
+      base.map((p, i) => (i === idx ? { ...p, naturalLanguage } : p)),
+    );
+  };
+
+  // Edit an existing (BEFORE) rule directly. Saves via PUT /api/rules/:id
+  // and invalidates the rules query so the card re-renders with the
+  // updated text from `ruleById`.
+  const editRule = useMutation<unknown, Error, { id: string; naturalLanguage: string }>({
+    mutationFn: ({ id, naturalLanguage }) =>
+      apiSend('PUT', `/api/rules/${id}`, { naturalLanguage }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['rules'] }),
+  });
+  const onEditExisting = async (id: string, naturalLanguage: string) => {
+    await editRule.mutateAsync({ id, naturalLanguage });
+  };
+  const isExistingSaving = (id: string) =>
+    editRule.isPending && editRule.variables?.id === id;
+
+  const handleApply = () => {
+    const finalRec: Recommendation = { ...rec };
+    if (editedProposed) finalRec.proposed = editedProposed;
+    if (rec.kind === 'disable') {
+      finalRec.affectedRuleIds = Array.from(selected);
+    }
+    onApply(finalRec);
+  };
+
+  const cls = `rec-card rec-card--${rec.kind}`;
+  return (
+    <div className={cls}>
+      <div className="rec-card-head">
+        <span className={`chip rec-kind rec-kind--${rec.kind}`}>
+          {KIND_LABELS[rec.kind]}
+        </span>
+        <span className="muted rec-card-conf">
+          {Math.round(rec.confidence * 100)}% confidence
+        </span>
+      </div>
+
+      {/* Body: each kind gets a tailored layout. */}
+      {rec.kind === 'disable' ? (
+        <DisableBody
+          rec={rec}
+          ruleById={ruleById}
+          selected={selected}
+          allSelected={allSelected}
+          onToggle={toggle}
+          onToggleAll={toggleAll}
+          onEditExisting={onEditExisting}
+          isExistingSaving={isExistingSaving}
+        />
+      ) : rec.kind === 'merge' ? (
+        <MergeBody
+          rec={rec}
+          ruleById={ruleById}
+          proposed={proposedLive}
+          onEditProposed={onEditProposed}
+          onEditExisting={onEditExisting}
+          isExistingSaving={isExistingSaving}
+        />
+      ) : rec.kind === 'split' ? (
+        <SplitBody
+          rec={rec}
+          ruleById={ruleById}
+          proposed={proposedLive}
+          onEditProposed={onEditProposed}
+          onEditExisting={onEditExisting}
+          isExistingSaving={isExistingSaving}
+        />
+      ) : (
+        // sharpen / simplify / list_aware — all single-rule rewrites
+        <RewriteBody
+          rec={rec}
+          ruleById={ruleById}
+          proposed={proposedLive}
+          onEditProposed={onEditProposed}
+          onEditExisting={onEditExisting}
+          isExistingSaving={isExistingSaving}
+        />
+      )}
+
+      {editRule.isError && (
+        <div className="banner error" style={{ marginTop: '0.4rem' }}>
+          Couldn't save rule edit: {(editRule.error as Error).message}
+        </div>
+      )}
+
+      <div className="rec-card-rationale muted">{rec.rationale}</div>
+
+      {applyError && (
+        <div className="banner error" style={{ marginTop: '0.4rem' }}>
+          Apply failed: {applyError}
+        </div>
+      )}
+      <div className="row" style={{ gap: '0.4rem', marginTop: '0.55rem' }}>
+        <button onClick={onSkip} disabled={applying}>
+          Skip
+        </button>
+        <button
+          className="primary"
+          onClick={handleApply}
+          disabled={applying || (rec.kind === 'disable' && noneSelected)}
+        >
+          {applying
+            ? 'Applying…'
+            : rec.kind === 'disable'
+              ? `Apply (${selected.size})`
+              : 'Apply'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Per-kind body components ────────────────────────────────────────────
+
+type EditExistingFn = (id: string, naturalLanguage: string) => Promise<void>;
+type EditProposedFn = (idx: number, naturalLanguage: string) => void;
+type IsExistingSavingFn = (id: string) => boolean;
+
+/** DISABLE — list of affected rules with a checkbox per row. The user
+ *  can uncheck rules they want to keep enabled. Toggle-all in the
+ *  header. Apply only sends the checked ids. */
+function DisableBody({
+  rec,
+  ruleById,
+  selected,
+  allSelected,
+  onToggle,
+  onToggleAll,
+  onEditExisting,
+  isExistingSaving,
+}: {
+  rec: Recommendation;
+  ruleById: Map<string, { id: string; naturalLanguage: string; enabled: boolean }>;
+  selected: Set<string>;
+  allSelected: boolean;
+  onToggle: (id: string) => void;
+  onToggleAll: () => void;
+  onEditExisting: EditExistingFn;
+  isExistingSaving: IsExistingSavingFn;
+}) {
+  return (
+    <>
+      <div className="rec-card-detail">
+        <div
+          className="rec-card-section-head muted"
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+          }}
+        >
+          <span>
+            Will disable {selected.size} of {rec.affectedRuleIds.length}
+          </span>
+          <button
+            type="button"
+            className="rec-toggle-all"
+            onClick={onToggleAll}
+          >
+            {allSelected ? 'Uncheck all' : 'Check all'}
+          </button>
+        </div>
+        <ul className="rec-card-list">
+          {rec.affectedRuleIds.map((id) => {
+            const r = ruleById.get(id);
+            const checked = selected.has(id);
+            const text = r?.naturalLanguage ?? '(rule no longer exists)';
+            const exists = !!r;
+            return (
+              <li key={id} className="rec-card-rule rec-card-rule--check">
+                <input
+                  type="checkbox"
+                  className="rec-checkbox"
+                  checked={checked}
+                  onChange={() => onToggle(id)}
+                  aria-label={`Disable: ${text}`}
+                />
+                <InlineRuleEditor
+                  text={text}
+                  onSave={exists ? (next) => onEditExisting(id, next) : null}
+                  saving={exists && isExistingSaving(id)}
+                  textClassName={r?.enabled === false ? 'muted' : ''}
+                />
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+    </>
+  );
+}
+
+/** MERGE — N rules collapse into 1. Show the inputs as a list, then
+ *  the proposed canonical version. */
+function MergeBody({
+  rec,
+  ruleById,
+  proposed,
+  onEditProposed,
+  onEditExisting,
+  isExistingSaving,
+}: {
+  rec: Recommendation;
+  ruleById: Map<string, { id: string; naturalLanguage: string; enabled: boolean }>;
+  proposed: ProposedRule[];
+  onEditProposed: EditProposedFn;
+  onEditExisting: EditExistingFn;
+  isExistingSaving: IsExistingSavingFn;
+}) {
+  const proposedNL = proposed[0]?.naturalLanguage ?? '';
+  return (
+    <>
+      <div className="rec-card-detail">
+        <div className="rec-card-section-head muted">
+          Before · {rec.affectedRuleIds.length} rules
+        </div>
+        <ul className="rec-card-list">
+          {rec.affectedRuleIds.map((id) => {
+            const r = ruleById.get(id);
+            const text = r?.naturalLanguage ?? '(rule no longer exists)';
+            return (
+              <li key={id} className="rec-card-rule">
+                <InlineRuleEditor
+                  text={text}
+                  onSave={r ? (next) => onEditExisting(id, next) : null}
+                  saving={!!r && isExistingSaving(id)}
+                />
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+      <div className="rec-card-detail">
+        <div className="rec-card-section-head muted">After · 1 rule</div>
+        <div className="rec-card-rule rec-card-after">
+          <InlineRuleEditor
+            text={proposedNL}
+            onSave={(next) => onEditProposed(0, next)}
+          />
+        </div>
+      </div>
+    </>
+  );
+}
+
+/** SPLIT — 1 rule into N. Mirror of merge. */
+function SplitBody({
+  rec,
+  ruleById,
+  proposed,
+  onEditProposed,
+  onEditExisting,
+  isExistingSaving,
+}: {
+  rec: Recommendation;
+  ruleById: Map<string, { id: string; naturalLanguage: string; enabled: boolean }>;
+  proposed: ProposedRule[];
+  onEditProposed: EditProposedFn;
+  onEditExisting: EditExistingFn;
+  isExistingSaving: IsExistingSavingFn;
+}) {
+  const sourceId = rec.affectedRuleIds[0];
+  const sourceRule = sourceId ? ruleById.get(sourceId) : undefined;
+  const sourceNL = sourceRule?.naturalLanguage ?? '(rule no longer exists)';
+  return (
+    <>
+      <div className="rec-card-detail">
+        <div className="rec-card-section-head muted">Before · 1 rule</div>
+        <div className="rec-card-rule">
+          <InlineRuleEditor
+            text={sourceNL}
+            onSave={
+              sourceId && sourceRule
+                ? (next) => onEditExisting(sourceId, next)
+                : null
+            }
+            saving={!!sourceId && isExistingSaving(sourceId)}
+          />
+        </div>
+      </div>
+      <div className="rec-card-detail">
+        <div className="rec-card-section-head muted">
+          After · {proposed.length} rules
+        </div>
+        <ul className="rec-card-list">
+          {proposed.map((p, i) => (
+            <li key={i} className="rec-card-rule rec-card-after">
+              <InlineRuleEditor
+                text={p.naturalLanguage}
+                onSave={(next) => onEditProposed(i, next)}
+              />
+            </li>
+          ))}
+        </ul>
+      </div>
+    </>
+  );
+}
+
+/** SHARPEN / SIMPLIFY / LIST_AWARE — single-rule rewrite. Word-level
+ *  diff so removed words show struck through, added words highlighted. */
+function RewriteBody({
+  rec,
+  ruleById,
+  proposed,
+  onEditProposed,
+  onEditExisting,
+  isExistingSaving,
+}: {
+  rec: Recommendation;
+  ruleById: Map<string, { id: string; naturalLanguage: string; enabled: boolean }>;
+  proposed: ProposedRule[];
+  onEditProposed: EditProposedFn;
+  onEditExisting: EditExistingFn;
+  isExistingSaving: IsExistingSavingFn;
+}) {
+  const sourceId = rec.affectedRuleIds[0];
+  const sourceRule = sourceId ? ruleById.get(sourceId) : undefined;
+  const sourceNL = sourceRule?.naturalLanguage ?? '(rule no longer exists)';
+  const proposedNL = proposed[0]?.naturalLanguage ?? '';
+  return (
+    <>
+      <div className="rec-card-detail">
+        <div className="rec-card-section-head muted">Before</div>
+        <div className="rec-card-rule rec-card-before">
+          <InlineRuleEditor
+            text={sourceNL}
+            onSave={
+              sourceId && sourceRule
+                ? (next) => onEditExisting(sourceId, next)
+                : null
+            }
+            saving={!!sourceId && isExistingSaving(sourceId)}
+            renderText={(text) => (
+              <DiffSpan text={text} other={proposedNL} side="before" />
+            )}
+          />
+        </div>
+      </div>
+      <div className="rec-card-detail">
+        <div className="rec-card-section-head muted">After</div>
+        <div className="rec-card-rule rec-card-after">
+          <InlineRuleEditor
+            text={proposedNL}
+            onSave={(next) => onEditProposed(0, next)}
+            renderText={(text) => (
+              <DiffSpan text={text} other={sourceNL} side="after" />
+            )}
+          />
+        </div>
+      </div>
+    </>
+  );
+}
+
+// ── Inline rule editor ─────────────────────────────────────────────────
+
+/**
+ * Renders `text` with a tiny ✎ pencil button at the end. Click → swap
+ * to a textarea with Save / Cancel. `onSave` is called with the trimmed
+ * draft when the user saves; pass `null` to make the row read-only
+ * (e.g., for a rule that no longer exists).
+ *
+ * `renderText` lets callers like RewriteBody substitute a DiffSpan for
+ * the read-only display while still using this component's edit
+ * affordance.
+ */
+function InlineRuleEditor({
+  text,
+  onSave,
+  saving = false,
+  renderText,
+  textClassName,
+}: {
+  text: string;
+  onSave: ((next: string) => void | Promise<void>) | null;
+  saving?: boolean;
+  renderText?: (text: string) => ReactNode;
+  textClassName?: string;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(text);
+  // Sync draft when the canonical text changes from outside while we're
+  // not actively editing (e.g., another card refetched the rules query).
+  useEffect(() => {
+    if (!editing) setDraft(text);
+  }, [text, editing]);
+
+  if (editing) {
+    const dirty = draft.trim().length > 0 && draft.trim() !== text.trim();
+    const cancel = () => {
+      setDraft(text);
+      setEditing(false);
+    };
+    return (
+      <div className="rec-rule-edit-form">
+        <textarea
+          className="rec-rule-edit-textarea"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          rows={Math.min(6, Math.max(2, Math.ceil(draft.length / 60)))}
+          autoFocus
+          spellCheck
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') cancel();
+            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && dirty && onSave) {
+              e.preventDefault();
+              void (async () => {
+                await onSave(draft.trim());
+                setEditing(false);
+              })();
+            }
+          }}
+        />
+        <div className="row" style={{ gap: '0.3rem', marginTop: '0.3rem' }}>
+          <button
+            type="button"
+            className="primary"
+            disabled={saving || !dirty || !onSave}
+            onClick={async () => {
+              if (!onSave) return;
+              await onSave(draft.trim());
+              setEditing(false);
+            }}
+          >
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+          <button type="button" onClick={cancel} disabled={saving}>
+            Cancel
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <span className="rec-rule-row">
+      <span className={`rec-rule-text ${textClassName ?? ''}`}>
+        {renderText ? renderText(text) : text}
+      </span>
+      {onSave && (
+        <button
+          type="button"
+          className="rec-rule-edit-btn"
+          onClick={() => setEditing(true)}
+          title="Edit rule"
+          aria-label="Edit rule"
+        >
+          ✎
+        </button>
+      )}
+    </span>
+  );
+}
+
+// ── Word-level diff renderer ────────────────────────────────────────────
+
+/**
+ * Render `text` with words that don't appear (case-insensitively) in
+ * `other` highlighted. Not a full LCS diff — that would mark too much
+ * as changed for paraphrased rewrites — but the simple "is this word
+ * present in the other side?" heuristic catches the changed pieces
+ * cleanly for short rule sentences.
+ */
+function DiffSpan({
+  text,
+  other,
+  side,
+}: {
+  text: string;
+  other: string;
+  side: 'before' | 'after';
+}) {
+  const otherTokens = new Set(
+    other.toLowerCase().match(/[\w@./\-:'"]+/g) ?? [],
+  );
+  // Tokenise preserving whitespace + punctuation breaks.
+  const parts = text.split(/(\s+)/);
+  return (
+    <>
+      {parts.map((p, i) => {
+        if (/^\s*$/.test(p)) return p;
+        const norm = p.toLowerCase().replace(/^[^\w]+|[^\w]+$/g, '');
+        const inOther = norm.length === 0 || otherTokens.has(norm);
+        if (inOther) return p;
+        return (
+          <span
+            key={i}
+            className={side === 'before' ? 'diff-removed' : 'diff-added'}
+          >
+            {p}
+          </span>
+        );
+      })}
+    </>
+  );
+}
+
+function CleanupCacheSection() {
+  const reset = useMutation<{ ok: true; cleared: number }>({
+    mutationFn: () => apiSend('POST', '/api/inbox-cleanup/cache/reset'),
+  });
+  return (
+    <section className="settings-section">
+      <h2>Cleanup wizard cache</h2>
+      <p className="muted" style={{ fontSize: '0.85rem' }}>
+        The wizard caches each email's proposed rule + match preview for 12h
+        so re-opening it is instant. Reset to force fresh proposals (e.g.
+        after editing AI guidance).
+      </p>
+      <div className="row" style={{ gap: '0.5rem', marginTop: '0.5rem' }}>
+        <button onClick={() => reset.mutate()} disabled={reset.isPending}>
+          {reset.isPending ? 'Resetting…' : 'Reset cleanup cache'}
+        </button>
+        {reset.isSuccess && (
+          <span className="muted" style={{ fontSize: '0.85rem' }}>
+            Cleared {reset.data.cleared} cached entr
+            {reset.data.cleared === 1 ? 'y' : 'ies'}.
+          </span>
+        )}
+        {reset.isError && (
+          <span className="error" style={{ fontSize: '0.85rem' }}>
+            Failed: {(reset.error as Error).message}
+          </span>
+        )}
+      </div>
+    </section>
+  );
+}
 
 /**
  * Read-only audit table over every Gmail-mutating action the system has
@@ -304,6 +1040,7 @@ function AuditLogSection() {
           <option value="cleanup">cleanup</option>
           <option value="chat">chat</option>
           <option value="consolidator">consolidator</option>
+          <option value="maintenance">maintenance</option>
         </select>
       </div>
 

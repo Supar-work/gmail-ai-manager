@@ -21,7 +21,9 @@ agentActionsRouter.use(requireUser);
 // ── GET / — list with filters ──────────────────────────────────────────
 
 const ListQuerySchema = z.object({
-  source: z.enum(['rule', 'schedule', 'cleanup', 'chat', 'consolidator']).optional(),
+  source: z
+    .enum(['rule', 'schedule', 'cleanup', 'chat', 'consolidator', 'maintenance'])
+    .optional(),
   targetType: z.enum(['gmailMessage', 'gmailLabel', 'rule', 'scheduledAction']).optional(),
   /** ISO timestamp; only entries newer than this. */
   since: z.string().datetime().optional(),

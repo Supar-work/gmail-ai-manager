@@ -6,9 +6,13 @@ import {
   CleanupApplyResultSchema,
   CleanupPreviewSchema,
   CleanupProposalSchema,
+  CleanupOutcomeSchema,
+  CleanupCoveredSchema,
   CleanupScopeSchema,
   CleanupSessionSchema,
   type CleanupProposal,
+  type CleanupOutcome,
+  type CleanupCovered,
   type CleanupPreview,
   type InboxMessagePreview,
 } from '@gam/shared';
@@ -79,7 +83,7 @@ function getSession(sessionId: string, userId: string): SessionState {
 // ── Caches (12h) ───────────────────────────────────────────────────────────
 
 const TTL_12H = 12 * 60 * 60 * 1000;
-const proposalCache = new TtlCache<CleanupProposal>(TTL_12H);
+const proposalCache = new TtlCache<CleanupOutcome>(TTL_12H);
 const previewCache = new TtlCache<CleanupPreview>(TTL_12H);
 
 function proposalKey(userId: string, messageId: string, historyId: string | null): string {
@@ -106,24 +110,74 @@ inboxCleanupRouter.post('/session/start', async (req, res) => {
     logger.warn({ err, userId }, 'inbox sync failed — continuing with cached data');
   }
 
+  // Pull a deeper pool than MAX_INBOX_QUEUE; we'll filter out messages
+  // already covered by an enabled rule and slice down to the cap.
+  // Anything past 2× the cap is stale enough that re-pulling it isn't
+  // worth the prefetch cost.
   const rows = await prisma.inboxMessage.findMany({
     where: { userId },
     orderBy: { internalDate: 'desc' },
-    take: MAX_INBOX_QUEUE,
+    take: MAX_INBOX_QUEUE * 2,
     select: { gmailMessageId: true },
   });
   const totalInbox = await prisma.inboxMessage.count({ where: { userId } });
+
+  // Build the set of message ids already classified by an enabled rule
+  // (per EmailDecision.matchedRuleIds). Skip those — the wizard
+  // shouldn't ask the user to write a rule for an email another rule
+  // already handles.
+  const enabledRules = await prisma.rule.findMany({
+    where: { userId, enabled: true },
+    select: { id: true },
+  });
+  const enabledRuleIds = new Set(enabledRules.map((r) => r.id));
+  let alreadyCovered = new Set<string>();
+  if (enabledRuleIds.size > 0) {
+    const decisions = await prisma.emailDecision.findMany({
+      where: { userId, gmailMessageId: { in: rows.map((r) => r.gmailMessageId) } },
+      select: { gmailMessageId: true, matchedRuleIds: true },
+    });
+    alreadyCovered = new Set(
+      decisions
+        .filter((d) => {
+          try {
+            const ids = JSON.parse(d.matchedRuleIds) as unknown;
+            return (
+              Array.isArray(ids) &&
+              ids.some((id) => typeof id === 'string' && enabledRuleIds.has(id))
+            );
+          } catch {
+            return false;
+          }
+        })
+        .map((d) => d.gmailMessageId),
+    );
+  }
+
+  const queue = rows
+    .map((r) => r.gmailMessageId)
+    .filter((id) => !alreadyCovered.has(id))
+    .slice(0, MAX_INBOX_QUEUE);
 
   const sessionId = randomBytes(9).toString('base64url');
   const state: SessionState = {
     userId,
     createdAt: Date.now(),
-    queue: rows.map((r) => r.gmailMessageId),
+    queue,
     covered: new Set(),
     applied: [],
     totalInbox,
   };
   sessions.set(sessionId, state);
+  logger.info(
+    {
+      userId,
+      pool: rows.length,
+      filteredOut: alreadyCovered.size,
+      queue: queue.length,
+    },
+    'inbox-cleanup session started',
+  );
 
   const body = CleanupSessionSchema.parse({
     sessionId,
@@ -230,6 +284,10 @@ inboxCleanupRouter.post('/session/:id/propose', async (req, res) => {
     body: row.bodyText,
     labels: safeLabels(row.labelIds),
     date: row.dateHeader,
+    listId: row.listId,
+    listPost: row.listPost,
+    originalFrom: row.originalFromHeader,
+    precedence: row.precedence,
   };
 
   const user = await prisma.user.findUnique({ where: { id: userId } });
@@ -272,6 +330,16 @@ inboxCleanupRouter.post('/session/:id/propose', async (req, res) => {
       logger.warn({ err, userId, messageId: row.gmailMessageId }, 'pre-compute label-rec failed');
     }
 
+    // Load the user's enabled rules so the proposer can short-circuit
+    // when this email is already covered. Read fresh on every propose
+    // call so rules created earlier in the wizard session ("live
+    // re-check") are visible.
+    const existingRules = await prisma.rule.findMany({
+      where: { userId, enabled: true },
+      orderBy: { position: 'asc' },
+      select: { id: true, naturalLanguage: true },
+    });
+
     const result = await proposeAndRefine({
       email,
       nowIso: new Date().toISOString(),
@@ -280,9 +348,25 @@ inboxCleanupRouter.post('/session/:id/propose', async (req, res) => {
       searchMatches: (query) => searchMatchesForRule(userId, query),
       preferredLabel,
       aiGuidance: effectiveGuidanceWithMemory(user?.aiGuidance, user?.learnedMemory),
+      existingRules,
     });
 
+    if (result.outcome === 'covered') {
+      const covered: CleanupCovered = {
+        outcome: 'covered',
+        messageId: row.gmailMessageId,
+        ruleId: result.ruleId,
+        ruleNL: result.ruleNL,
+        reasoning: result.reasoning,
+      };
+      CleanupCoveredSchema.parse(covered);
+      proposalCache.set(cacheK, covered);
+      res.json(covered);
+      return;
+    }
+
     const proposal: CleanupProposal = {
+      outcome: 'propose',
       messageId: row.gmailMessageId,
       naturalLanguage: result.naturalLanguage,
       actions: result.actions,
@@ -293,6 +377,7 @@ inboxCleanupRouter.post('/session/:id/propose', async (req, res) => {
       refineHistory: result.refineHistory,
       samples: result.samples,
       totals: result.totals,
+      ruleTokens: result.ruleTokens,
     };
 
     CleanupProposalSchema.parse(proposal); // runtime sanity check
@@ -305,6 +390,7 @@ inboxCleanupRouter.post('/session/:id/propose', async (req, res) => {
       actions: proposal.actions,
       samples: proposal.samples,
       totals: proposal.totals,
+      ruleTokens: proposal.ruleTokens,
     });
 
     res.json(proposal);
@@ -396,6 +482,7 @@ inboxCleanupRouter.post('/session/:id/preview-matches', async (req, res) => {
       actions: reproposed.actions,
       samples: search.samples,
       totals: search.totals,
+      ruleTokens: reproposed.ruleTokens,
     };
 
     CleanupPreviewSchema.parse(preview);
@@ -404,6 +491,76 @@ inboxCleanupRouter.post('/session/:id/preview-matches', async (req, res) => {
   } catch (err) {
     if (handleGmailError(err, userId, res)) return;
     logger.error({ err, userId }, 'preview-matches failed');
+    res.status(500).json({
+      error: 'preview_failed',
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
+});
+
+/**
+ * POST /session/:id/preview-structured — chip-driven preview that
+ * skips the Claude repropose step. The chip composer in
+ * apps/web/src/components/RuleChipComposer.tsx owns the rule's
+ * structure (Gmail q: query + actions + a synthesised NL string), so
+ * this endpoint just runs the search against the user-supplied query
+ * and echoes the actions back. No model latency per keystroke.
+ */
+const PreviewStructuredBody = z.object({
+  messageId: z.string(),
+  naturalLanguage: z.string().min(1),
+  gmailQuery: z.string().min(1),
+  actions: z.array(ActionSchema).min(1),
+  limit: z.number().int().min(1).max(25).optional(),
+});
+
+inboxCleanupRouter.post('/session/:id/preview-structured', async (req, res) => {
+  const userId = getUserId(req);
+  const parsed = PreviewStructuredBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'bad_body', details: parsed.error.flatten() });
+    return;
+  }
+  try {
+    getSession(req.params.id, userId);
+  } catch {
+    res.status(404).json({ error: 'session_not_found' });
+    return;
+  }
+
+  // Cache by (user, message, query, actions) so unchanged chip edits
+  // don't re-hit Gmail. NL is excluded from the key on purpose —
+  // synthesised wording shouldn't bust the cache.
+  const cacheKey = [
+    userId,
+    parsed.data.messageId,
+    ruleHash(parsed.data.gmailQuery),
+    ruleHash(JSON.stringify(parsed.data.actions)),
+  ].join(':');
+  const cached = previewCache.get(cacheKey);
+  if (cached) {
+    res.json(cached);
+    return;
+  }
+
+  try {
+    const search = await searchMatchesForRule(userId, parsed.data.gmailQuery, {
+      maxSamples: parsed.data.limit ?? 10,
+    });
+    const preview: CleanupPreview = {
+      naturalLanguage: parsed.data.naturalLanguage,
+      gmailQuery: parsed.data.gmailQuery,
+      actions: parsed.data.actions,
+      samples: search.samples,
+      totals: search.totals,
+      ruleTokens: undefined,
+    };
+    CleanupPreviewSchema.parse(preview);
+    previewCache.set(cacheKey, preview);
+    res.json(preview);
+  } catch (err) {
+    if (handleGmailError(err, userId, res)) return;
+    logger.error({ err, userId }, 'preview-structured failed');
     res.status(500).json({
       error: 'preview_failed',
       message: err instanceof Error ? err.message : String(err),
@@ -458,7 +615,7 @@ inboxCleanupRouter.get('/session/:id/message/:messageId/label-recommendation', a
 
   let samples: Awaited<ReturnType<typeof fetchLabelSamplesForQuery>> = [];
   let currentLabel: string | null = null;
-  if (cachedProposal) {
+  if (cachedProposal && cachedProposal.outcome === 'propose') {
     samples = cachedProposal.samples.map((s) => ({
       from: s.from,
       subject: s.subject,
@@ -686,6 +843,49 @@ inboxCleanupRouter.get('/session/:id/summary', async (req, res) => {
     remaining: state.queue.filter((id) => !state.covered.has(id)).length,
   });
 });
+
+/**
+ * POST /api/inbox-cleanup/cache/reset — drop every in-memory cache the
+ * cleanup wizard relies on, so the next propose / preview / label-
+ * recommendation hits Claude fresh. Useful after editing AI guidance,
+ * changing the proposer prompt, or when a cached proposal looks
+ * stale. Per-user only; we filter cache keys by userId so one user
+ * can't bust another's cache.
+ */
+inboxCleanupRouter.post('/cache/reset', async (req, res) => {
+  const userId = getUserId(req);
+  let cleared = 0;
+  // The keys are formatted "<userId>:<rest>"; drop everything that
+  // matches this user. We can't iterate TtlCache directly, so
+  // expose a key-filtered clear via a small helper below.
+  cleared += clearForUser(proposalCache, userId);
+  cleared += clearForUser(previewCache, userId);
+  cleared += clearForUser(recommendCache, userId);
+  res.json({ ok: true, cleared });
+});
+
+function clearForUser<V>(
+  cache: TtlCache<V>,
+  userId: string,
+): number {
+  // TtlCache exposes Map-shaped semantics through get/set/delete and
+  // a clear-all. To clear only this user's keys we reach into its
+  // internal store via a known prefix scan: we KNOW every cleanup
+  // cache key starts with "<userId>:" because every callsite prefixes
+  // it (see proposalKey + previewCache.set + labelRecKey).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const internal = (cache as any).store as Map<string, unknown>;
+  if (!(internal instanceof Map)) return 0;
+  const prefix = `${userId}:`;
+  let n = 0;
+  for (const k of Array.from(internal.keys())) {
+    if (k.startsWith(prefix)) {
+      internal.delete(k);
+      n++;
+    }
+  }
+  return n;
+}
 
 // ── Small helper ───────────────────────────────────────────────────────────
 

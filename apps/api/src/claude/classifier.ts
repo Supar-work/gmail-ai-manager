@@ -15,6 +15,17 @@ export type ClassifyEmail = {
   body: string | null;
   labels: string[];
   date: string | null;
+  /**
+   * Mailing-list metadata. When present, the visible `from` is the
+   * list address (often rewritten by Google Groups / Mailman / etc.)
+   * and the real sender is in `originalFrom`. The classifier uses
+   * this to match list-aware rules correctly — a rule like
+   * `list:zelig.zelig.me` is matched by `listId`, not `from`.
+   */
+  listId?: string | null;
+  listPost?: string | null;
+  originalFrom?: string | null;
+  precedence?: string | null;
 };
 
 export type ClassifyContext = {
@@ -73,7 +84,18 @@ Output rules:
       parse from the provided "now" + email body → UTC
 - If no rule matches, return {"matches":[]}.
 - Only emit ruleIds from the provided list. Do not invent rules or actions
-  that aren't described by the rule text.`;
+  that aren't described by the rule text.
+- MAILING-LIST AWARENESS: when the email block has "listId" set (and/or
+  "originalFrom" is non-null), the visible "from" is the LIST address
+  rewritten by Google Groups / Mailman / etc. — NOT the original sender.
+  When matching against rule text:
+    * a sender predicate like "from foo@bar.com" should match if EITHER
+      the visible "from" OR "originalFrom" is foo@bar.com.
+    * a list predicate like "via list:zelig.zelig.me" should match the
+      "listId" field, not "from".
+    * brand-name conditions ("Apple", "Substack") apply to the
+      original sender's brand domain (originalFrom) when it differs
+      from the rewritten From.`;
 
 function compactRule(r: ClassifyRule) {
   return { id: r.id, nl: r.naturalLanguage };
@@ -89,6 +111,14 @@ function compactEmail(e: ClassifyEmail) {
     labels: e.labels,
     date: e.date,
     body,
+    listId: e.listId ?? null,
+    listPost: e.listPost ?? null,
+    // Real sender behind a list rewrite. When non-null, `from` is the
+    // list address; rules that key off the list should use `list:<id>`,
+    // and rules that key off the actual brand should compare to
+    // `originalFrom`, NOT `from`.
+    originalFrom: e.originalFrom ?? null,
+    precedence: e.precedence ?? null,
   };
 }
 
