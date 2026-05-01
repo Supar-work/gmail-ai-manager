@@ -25,7 +25,12 @@ function verify(signed: string): string | null {
 export function setSession(res: Response, userId: string): void {
   res.cookie(COOKIE_NAME, sign(userId), {
     httpOnly: true,
-    secure: env.NODE_ENV === 'production',
+    // Loopback-only over HTTP. Setting Secure=true makes Safari accept
+    // the cookie but never return it on subsequent plain-HTTP requests,
+    // so /me would 401 right after a successful OAuth and the UI would
+    // bounce back to /login. The cookie can never leave 127.0.0.1, so
+    // there's nothing to protect against.
+    secure: false,
     sameSite: 'lax',
     maxAge: MAX_AGE_MS,
     path: '/',

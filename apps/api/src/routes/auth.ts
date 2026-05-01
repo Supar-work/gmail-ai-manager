@@ -16,7 +16,12 @@ authRouter.get('/google/start', (req, res) => {
   const state = randomBytes(16).toString('base64url');
   res.cookie(STATE_COOKIE, state, {
     httpOnly: true,
-    secure: env.NODE_ENV === 'production',
+    // Loopback-only over HTTP. Secure=true would hide the cookie from
+    // Safari's cookie jar (Set-Cookie accepted but never returned on
+    // plain-HTTP localhost), which broke the OAuth callback with
+    // bad_state. The cookie can never leave the loopback interface, so
+    // there's nothing to protect against MITM.
+    secure: false,
     sameSite: 'lax',
     maxAge: 10 * 60 * 1000,
     path: '/',
@@ -24,7 +29,12 @@ authRouter.get('/google/start', (req, res) => {
   const tz = typeof req.query.tz === 'string' ? req.query.tz : 'UTC';
   res.cookie(TZ_COOKIE, tz, {
     httpOnly: true,
-    secure: env.NODE_ENV === 'production',
+    // Loopback-only over HTTP. Secure=true would hide the cookie from
+    // Safari's cookie jar (Set-Cookie accepted but never returned on
+    // plain-HTTP localhost), which broke the OAuth callback with
+    // bad_state. The cookie can never leave the loopback interface, so
+    // there's nothing to protect against MITM.
+    secure: false,
     sameSite: 'lax',
     maxAge: 10 * 60 * 1000,
     path: '/',
