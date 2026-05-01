@@ -20,6 +20,8 @@ import { migrateLabel } from '../gmail/label-migrate.js';
 import { CANONICAL_LABELS } from '../canonical-labels.js';
 import { TtlCache } from '../util/ttl-cache.js';
 import { logger } from '../logger.js';
+import { safeJson } from '../util/safe-json.js';
+import { handleGmailError } from '../gmail/error.js';
 
 // 12-hour caches so repeating the wizard for the same inbox doesn't re-spawn
 // Claude for every row. Keys are `${userId}:${mirrorId}:${signature}` — the
@@ -61,27 +63,6 @@ function hydrate(row: {
     syncedAt: row.syncedAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
-}
-
-function safeJson<T>(s: string, fallback: T): T {
-  try {
-    return JSON.parse(s) as T;
-  } catch {
-    return fallback;
-  }
-}
-
-function handleGmailError(
-  err: unknown,
-  userId: string,
-  res: import('express').Response,
-): boolean {
-  if (err instanceof GoogleTokenError || isInvalidGrant(err)) {
-    void markNeedsReauth(userId);
-    res.status(401).json({ error: 'needs_reauth' });
-    return true;
-  }
-  return false;
 }
 
 gmailFiltersRouter.get('/', async (req, res) => {

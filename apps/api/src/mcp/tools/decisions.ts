@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { registerTool } from '../stdio-server.js';
 import { prisma } from '../../db/client.js';
+import { safeJson } from '../../util/safe-json.js';
 
 export function registerDecisionsReadTools(): void {
   registerTool({
@@ -35,12 +36,4 @@ export function registerDecisionsReadTools(): void {
       };
     },
   });
-}
-
-function safeJson<T>(s: string, fallback: T): T {
-  try {
-    return JSON.parse(s) as T;
-  } catch {
-    return fallback;
-  }
 }

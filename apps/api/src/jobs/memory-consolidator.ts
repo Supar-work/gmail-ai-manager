@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { prisma } from '../db/client.js';
 import { runClaudeJson } from '../claude/client.js';
 import { logger } from '../logger.js';
+import { safeJson } from '../util/safe-json.js';
 
 /**
  * Periodic job that distils observed user behaviour (recent
@@ -185,10 +186,3 @@ Respond with ONE JSON object, no fences, no prose:
   };
 }
 
-function safeJson<T>(s: string, fallback: T): T {
-  try {
-    return JSON.parse(s) as T;
-  } catch {
-    return fallback;
-  }
-}

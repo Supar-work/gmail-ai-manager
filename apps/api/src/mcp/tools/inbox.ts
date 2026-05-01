@@ -3,6 +3,7 @@ import { registerTool } from '../stdio-server.js';
 import { searchMatchesForRule } from '../../gmail/inbox-rule-search.js';
 import { gmailForUser } from '../../gmail/client.js';
 import { prisma } from '../../db/client.js';
+import { safeJson } from '../../util/safe-json.js';
 
 export function registerInboxReadTools(): void {
   registerTool({
@@ -80,12 +81,4 @@ export function registerInboxReadTools(): void {
       };
     },
   });
-}
-
-function safeJson<T>(s: string, fallback: T): T {
-  try {
-    return JSON.parse(s) as T;
-  } catch {
-    return fallback;
-  }
 }

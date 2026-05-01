@@ -6,6 +6,7 @@ import { runClaudeJson } from '../claude/client.js';
 import { CANONICAL_LABELS, canonicalBySlug, type CanonicalLabel } from '../canonical-labels.js';
 import { pMapLimit } from '../util/concurrency.js';
 import { logger } from '../logger.js';
+import { safeJson } from '../util/safe-json.js';
 
 const RECOMMEND_MODEL = 'claude-haiku-4-5-20251001';
 const SAMPLE_LIMIT = 8;
@@ -266,14 +267,6 @@ Rules:
   contradict it.
 - "skip" is for filters where no category cleanly applies.
 - Only use slugs listed above. Do NOT invent new slugs.`;
-}
-
-function safeJson<T>(s: string, fallback: T): T {
-  try {
-    return JSON.parse(s) as T;
-  } catch {
-    return fallback;
-  }
 }
 
 export { listLabels };

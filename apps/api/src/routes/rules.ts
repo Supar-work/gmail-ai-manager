@@ -5,6 +5,7 @@ import { requireUser, getUserId } from '../auth/middleware.js';
 import { prisma } from '../db/client.js';
 import { runClaudeJson } from '../claude/client.js';
 import { logger } from '../logger.js';
+import { safeParseArray } from '../util/safe-json.js';
 
 export const rulesRouter: RouterT = Router();
 
@@ -28,15 +29,6 @@ function hydrateRule(r: {
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
   };
-}
-
-function safeParseArray(s: string): unknown[] {
-  try {
-    const v = JSON.parse(s);
-    return Array.isArray(v) ? v : [];
-  } catch {
-    return [];
-  }
 }
 
 rulesRouter.get('/', async (req, res) => {
