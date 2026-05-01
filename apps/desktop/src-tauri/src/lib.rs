@@ -30,7 +30,15 @@ pub fn run() {
             // Tauri sidecar mechanism should package a node binary; for now
             // we shell out to the system node, matching the pnpm dev flow.
             if let Some(child) = spawn_sidecar(app.handle()) {
-                app.state::<Sidecar>().0.lock().unwrap().replace(child);
+                // unwrap_or_else recovers a poisoned mutex by taking the
+                // inner data anyway. A poisoned mutex here means an earlier
+                // panic mid-replace; we still want to register the child
+                // so the quit handler can kill it.
+                app.state::<Sidecar>()
+                    .0
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .replace(child);
             }
 
             // Build the tray menu. Pause/Resume + Stop run match the
@@ -165,39 +173,9 @@ fn spawn_sidecar(_app: &tauri::AppHandle) -> Option<Child> {
 
     // When launched from Finder / `open`, the app's stdio goes to /dev/null.
     // Redirect the sidecar's stdout + stderr to ~/Library/Logs/gmail-ai-manager/
-    // so errors are inspectable via `tail`.
-    let log_target: Stdio = match std::env::var_os("HOME") {
-        Some(home) => {
-            let log_dir = std::path::PathBuf::from(&home)
-                .join("Library")
-                .join("Logs")
-                .join("gmail-ai-manager");
-            let _ = std::fs::create_dir_all(&log_dir);
-            match std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(log_dir.join("server.log"))
-            {
-                Ok(f) => Stdio::from(f),
-                Err(_) => Stdio::inherit(),
-            }
-        }
-        None => Stdio::inherit(),
-    };
-    let log_target_err: Stdio = match std::env::var_os("HOME") {
-        Some(home) => {
-            let log_path = std::path::PathBuf::from(&home)
-                .join("Library")
-                .join("Logs")
-                .join("gmail-ai-manager")
-                .join("server.log");
-            match std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
-                Ok(f) => Stdio::from(f),
-                Err(_) => Stdio::inherit(),
-            }
-        }
-        None => Stdio::inherit(),
-    };
+    // so errors are inspectable via `tail`. Open the file once and try_clone
+    // for the second Stdio — Stdio::from() consumes the File.
+    let (log_target, log_target_err) = open_log_stdio().unwrap_or((Stdio::inherit(), Stdio::inherit()));
 
     cmd.arg(&api_entry)
         .stdin(Stdio::null())
@@ -274,6 +252,26 @@ fn spawn_sidecar(_app: &tauri::AppHandle) -> Option<Child> {
     }
 }
 
+/// Open ~/Library/Logs/gmail-ai-manager/server.log once and return two
+/// `Stdio` handles backed by the same File (one cloned). Returns `None` if
+/// HOME is unset or the file can't be opened — caller falls back to
+/// `Stdio::inherit()`.
+fn open_log_stdio() -> Option<(Stdio, Stdio)> {
+    let home = std::env::var_os("HOME")?;
+    let log_dir = std::path::PathBuf::from(home)
+        .join("Library")
+        .join("Logs")
+        .join("gmail-ai-manager");
+    let _ = std::fs::create_dir_all(&log_dir);
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_dir.join("server.log"))
+        .ok()?;
+    let f2 = f.try_clone().ok()?;
+    Some((Stdio::from(f), Stdio::from(f2)))
+}
+
 /// Default install location for the Node API sidecar. Kept alongside other
 /// per-user app state under Application Support so macOS doesn't prompt for
 /// iCloud / Documents access when launching from /Applications.
@@ -292,7 +290,8 @@ fn installed_api_entry() -> Option<std::path::PathBuf> {
 
 fn kill_sidecar(app: &tauri::AppHandle) {
     if let Some(state) = app.try_state::<Sidecar>() {
-        if let Some(mut child) = state.0.lock().unwrap().take() {
+        let mut guard = state.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(mut child) = guard.take() {
             let _ = child.kill();
         }
     }
