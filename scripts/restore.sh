@@ -106,6 +106,29 @@ case "$MODE" in
     step "Full restore — replacing data.db"
     SRC_DB="$SRC/data.db"
     [ -f "$SRC_DB" ] || die "no data.db found in $SRC"
+
+    # Integrity gate — refuse to swap in a corrupt snapshot. `quick_check`
+    # catches the majority of corruption issues without a full table
+    # scan; integrity_check is the slow paranoid version. Use the cheap
+    # one for the gate and bail loudly if it doesn't return "ok".
+    INTEGRITY="$(sqlite3 "$SRC_DB" 'PRAGMA quick_check' 2>&1 | head -n1 || true)"
+    if [ "$INTEGRITY" != "ok" ]; then
+      die "snapshot fails SQLite integrity check ($INTEGRITY)"
+    fi
+    printf "  ${GREEN}✓${RESET} snapshot integrity ok\n"
+
+    # Migration-version gate — reject snapshots whose Prisma migration
+    # history is older than the live DB (running newer code against an
+    # older schema would crash). Equal or newer is fine.
+    if [ -f "$TARGET_DB" ]; then
+      LIVE_MIGS="$(sqlite3 "$TARGET_DB" 'SELECT COUNT(*) FROM _prisma_migrations' 2>/dev/null || echo "0")"
+      SNAP_MIGS="$(sqlite3 "$SRC_DB"    'SELECT COUNT(*) FROM _prisma_migrations' 2>/dev/null || echo "0")"
+      if [ "$SNAP_MIGS" -lt "$LIVE_MIGS" ]; then
+        die "snapshot has $SNAP_MIGS Prisma migrations vs live $LIVE_MIGS — schema is older than the running app. Aborting."
+      fi
+      printf "  ${GREEN}✓${RESET} migrations: snapshot %s ≥ live %s\n" "$SNAP_MIGS" "$LIVE_MIGS"
+    fi
+
     mkdir -p "$TARGET_DIR"
     # Use sqlite3 .restore so we handle WAL / shm siblings cleanly.
     # If the target file doesn't exist, plain cp is fine.
@@ -122,6 +145,32 @@ case "$MODE" in
     fi
     printf "  ${GREEN}✓${RESET} restored %s → %s\n" \
       "$(stat -f %z "$SRC_DB" 2>/dev/null || stat -c %s "$SRC_DB") bytes" "$TARGET_DB"
+
+    # Restore api/.env (TOKEN_ENC_KEY + OAuth secret). Without this on a
+    # fresh machine the snapshot's encrypted token columns are
+    # unreadable. Only overwrite when the live file is missing or the
+    # caller explicitly confirms — clobbering secrets without warning is
+    # a data-loss vector.
+    SRC_ENV="$SRC/api.env"
+    LIVE_ENV="$TARGET_DIR/api/.env"
+    if [ -f "$SRC_ENV" ]; then
+      mkdir -p "$TARGET_DIR/api"
+      if [ -f "$LIVE_ENV" ]; then
+        if [ "${RESTORE_OVERWRITE_ENV:-0}" = "1" ]; then
+          cp "$SRC_ENV" "$LIVE_ENV"
+          chmod 600 "$LIVE_ENV"
+          printf "  ${GREEN}✓${RESET} api/.env overwritten (RESTORE_OVERWRITE_ENV=1)\n"
+        else
+          printf "  ${YELLOW}!${RESET} api/.env already present; not overwriting.\n"
+          printf "    Re-run with RESTORE_OVERWRITE_ENV=1 to replace it (this\n"
+          printf "    is REQUIRED if the snapshot's encrypted tokens should be readable).\n"
+        fi
+      else
+        cp "$SRC_ENV" "$LIVE_ENV"
+        chmod 600 "$LIVE_ENV"
+        printf "  ${GREEN}✓${RESET} api/.env restored\n"
+      fi
+    fi
     ;;
 
   merge)
@@ -130,44 +179,47 @@ case "$MODE" in
     [ -f "$SRC/gmail-filters.json" ] || die "missing gmail-filters.json in $SRC"
     [ -f "$TARGET_DB" ]              || die "live DB missing — use --full instead"
 
-    # Run upserts using SQLite's built-in JSON + readfile. json_each()
-    # iterates an array; each row's `value` is the object we json_extract
-    # fields from. INSERT OR REPLACE keys on the id primary key.
-    sqlite3 "$TARGET_DB" <<SQL
+    # Pass paths via a parameter rather than interpolating into the SQL
+    # heredoc — a backup directory containing a single quote would
+    # otherwise break out of the SQL string.
+    sqlite3 "$TARGET_DB" \
+      -cmd ".param set @rules_path '$(printf %s "$SRC/rules.json" | sed "s/'/''/g")'" \
+      -cmd ".param set @filters_path '$(printf %s "$SRC/gmail-filters.json" | sed "s/'/''/g")'" \
+      <<'SQL'
 -- Rules
 INSERT OR REPLACE INTO "Rule"
   ("id","userId","naturalLanguage","actionsJson","originalFilterJson",
    "position","enabled","createdAt","updatedAt")
 SELECT
-  json_extract(value,'\$.id'),
-  json_extract(value,'\$.userId'),
-  json_extract(value,'\$.naturalLanguage'),
-  json_extract(value,'\$.actionsJson'),
-  json_extract(value,'\$.originalFilterJson'),
-  json_extract(value,'\$.position'),
-  json_extract(value,'\$.enabled'),
-  json_extract(value,'\$.createdAt'),
-  json_extract(value,'\$.updatedAt')
-FROM json_each(readfile('$SRC/rules.json'));
+  json_extract(value,'$.id'),
+  json_extract(value,'$.userId'),
+  json_extract(value,'$.naturalLanguage'),
+  json_extract(value,'$.actionsJson'),
+  json_extract(value,'$.originalFilterJson'),
+  json_extract(value,'$.position'),
+  json_extract(value,'$.enabled'),
+  json_extract(value,'$.createdAt'),
+  json_extract(value,'$.updatedAt')
+FROM json_each(readfile(@rules_path));
 
 -- Gmail filter mirrors
 INSERT OR REPLACE INTO "GmailFilter"
   ("id","userId","currentGmailId","criteriaJson","actionJson","labelMap",
    "naturalLanguage","enabled","signature","syncedAt","createdAt","updatedAt")
 SELECT
-  json_extract(value,'\$.id'),
-  json_extract(value,'\$.userId'),
-  json_extract(value,'\$.currentGmailId'),
-  json_extract(value,'\$.criteriaJson'),
-  json_extract(value,'\$.actionJson'),
-  json_extract(value,'\$.labelMap'),
-  json_extract(value,'\$.naturalLanguage'),
-  json_extract(value,'\$.enabled'),
-  json_extract(value,'\$.signature'),
-  json_extract(value,'\$.syncedAt'),
-  json_extract(value,'\$.createdAt'),
-  json_extract(value,'\$.updatedAt')
-FROM json_each(readfile('$SRC/gmail-filters.json'));
+  json_extract(value,'$.id'),
+  json_extract(value,'$.userId'),
+  json_extract(value,'$.currentGmailId'),
+  json_extract(value,'$.criteriaJson'),
+  json_extract(value,'$.actionJson'),
+  json_extract(value,'$.labelMap'),
+  json_extract(value,'$.naturalLanguage'),
+  json_extract(value,'$.enabled'),
+  json_extract(value,'$.signature'),
+  json_extract(value,'$.syncedAt'),
+  json_extract(value,'$.createdAt'),
+  json_extract(value,'$.updatedAt')
+FROM json_each(readfile(@filters_path));
 SQL
 
     RULES_AFTER=$(sqlite3 "$TARGET_DB" 'SELECT COUNT(*) FROM "Rule"')
@@ -178,17 +230,31 @@ SQL
 esac
 
 # ── 5. Optional relaunch ────────────────────────────────────────────────
+# Use launchctl if the LaunchAgent is loaded so we restart in place
+# instead of racing a second copy of the .app against the keepalive
+# child. Falls back to `open` only when the LaunchAgent isn't loaded
+# (manual install or dev environment).
 if [ "$NO_LAUNCH" = "0" ]; then
-  APP=""
-  for candidate in \
-    "$HOME/Applications/Gmail AI Manager.app" \
-    "$HOME/Applications/Gmail AI Filters.app"
-  do
-    if [ -d "$candidate" ]; then APP="$candidate"; break; fi
-  done
-  if [ -n "$APP" ]; then
-    step "Relaunching $APP"
-    open "$APP"
+  step "Relaunching"
+  LABEL="work.supar.gam"
+  DOMAIN="gui/$(id -u)"
+  if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+    launchctl kickstart -k "$DOMAIN/$LABEL" >/dev/null 2>&1 || true
+    printf "  ${GREEN}✓${RESET} kickstarted LaunchAgent %s\n" "$LABEL"
+  else
+    APP=""
+    for candidate in \
+      "$HOME/Applications/Gmail AI Manager.app" \
+      "$HOME/Applications/Gmail AI Filters.app"
+    do
+      if [ -d "$candidate" ]; then APP="$candidate"; break; fi
+    done
+    if [ -n "$APP" ]; then
+      open "$APP"
+      printf "  ${GREEN}✓${RESET} opened %s\n" "$APP"
+    else
+      printf "  ${YELLOW}!${RESET} no LaunchAgent and no .app found; relaunch manually\n"
+    fi
   fi
 fi
 

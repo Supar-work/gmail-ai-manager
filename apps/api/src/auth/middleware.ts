@@ -1,7 +1,10 @@
 import type { Request, RequestHandler } from 'express';
 import { readSession } from './session.js';
 
-const USER_ID_KEY = Symbol.for('gaf.userId');
+// `Request.userId` is declaration-merged in apps/api/src/types/express.d.ts
+// so we can assign and read it as a typed property rather than smuggling
+// it through a symbol-keyed cast. The runtime check in `getUserId` still
+// catches "route forgot the middleware".
 
 export const requireUser: RequestHandler = (req, res, next) => {
   const userId = readSession(req);
@@ -9,12 +12,13 @@ export const requireUser: RequestHandler = (req, res, next) => {
     res.status(401).json({ error: 'unauthenticated' });
     return;
   }
-  (req as unknown as Record<symbol, string>)[USER_ID_KEY] = userId;
+  req.userId = userId;
   next();
 };
 
 export function getUserId(req: Request): string {
-  const v = (req as unknown as Record<symbol, string>)[USER_ID_KEY];
-  if (!v) throw new Error('getUserId called without requireUser middleware');
-  return v;
+  if (!req.userId) {
+    throw new Error('getUserId called without requireUser middleware');
+  }
+  return req.userId;
 }

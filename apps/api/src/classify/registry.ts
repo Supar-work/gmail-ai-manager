@@ -129,3 +129,27 @@ export function sweepOldRuns(maxAgeMs = 60 * 60 * 1000): void {
     }
   }
 }
+
+/**
+ * Flip every running classify run for `userId` to `stopping`. Returns the
+ * count of runs the call signaled. Used by the tray's "Stop current run"
+ * menu item.
+ */
+export function stopAllRunsForUser(userId: string): number {
+  let n = 0;
+  for (const s of runs.values()) {
+    if (s.userId === userId && s.status === 'running') {
+      s.control = 'stopping';
+      n++;
+    }
+  }
+  return n;
+}
+
+/** Returns true if any classify run for the user is currently active. */
+export function hasActiveRunForUser(userId: string): boolean {
+  for (const s of runs.values()) {
+    if (s.userId === userId && s.status === 'running') return true;
+  }
+  return false;
+}

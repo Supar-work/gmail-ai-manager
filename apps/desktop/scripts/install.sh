@@ -17,6 +17,28 @@ BUNDLE_SRC="$REPO/apps/desktop/src-tauri/target/release/bundle/macos/Gmail AI Ma
 BUNDLE_DST="$APPS_DIR/Gmail AI Manager.app"
 
 echo "[install] staging to $DEST"
+
+# ── 0. Stop the running API + tray before we rm -rf into its install dir.
+# Without this, an active Node sidecar holds the SQLite WAL open while we
+# wipe + replace $DEST/api, which can corrupt the on-disk file. Bootout
+# the LaunchAgent (cleanest), fall back to pkill, then wait for port
+# 3001 to free.
+LABEL="work.supar.gam"
+DOMAIN="gui/$(id -u)"
+if launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+  echo "[install] stopping LaunchAgent $LABEL before deploy"
+  launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+fi
+pkill -f "gam-desktop" 2>/dev/null || true
+pkill -f "gmail-ai-manager/api/dist/server.js" 2>/dev/null || true
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  if ! lsof -i :3001 -sTCP:LISTEN >/dev/null 2>&1; then break; fi
+  sleep 1
+done
+if lsof -i :3001 -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "[install] warn: port 3001 still in use after 10s; continuing" >&2
+fi
+
 mkdir -p "$DEST"
 
 # ── 1. deploy the api package with its prod deps ─────────────────────────

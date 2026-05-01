@@ -33,10 +33,23 @@ pub fn run() {
                 app.state::<Sidecar>().0.lock().unwrap().replace(child);
             }
 
-            // Build the tray menu.
+            // Build the tray menu. Pause/Resume + Stop run match the
+            // README's promise; they POST to /api/control/* over loopback.
             let open_item = MenuItem::with_id(app, "open", "Open Gmail AI Manager", true, None::<&str>)?;
+            let pause_item = MenuItem::with_id(app, "pause", "Pause polling", true, None::<&str>)?;
+            let resume_item = MenuItem::with_id(app, "resume", "Resume polling", true, None::<&str>)?;
+            let stop_runs_item = MenuItem::with_id(app, "stop_runs", "Stop current run", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open_item, &quit_item])?;
+            let menu = Menu::with_items(
+                app,
+                &[
+                    &open_item,
+                    &pause_item,
+                    &resume_item,
+                    &stop_runs_item,
+                    &quit_item,
+                ],
+            )?;
 
             let tray_icon = Image::from_bytes(TRAY_ICON_BYTES)?;
             let _tray = TrayIconBuilder::with_id("main")
@@ -47,6 +60,15 @@ pub fn run() {
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "open" => {
                         let _ = app.opener().open_url("http://localhost:3001", None::<&str>);
+                    }
+                    "pause" => {
+                        post_loopback("/api/control/pause");
+                    }
+                    "resume" => {
+                        post_loopback("/api/control/resume");
+                    }
+                    "stop_runs" => {
+                        post_loopback("/api/control/stop-runs");
                     }
                     "quit" => {
                         kill_sidecar(app);
@@ -274,4 +296,24 @@ fn kill_sidecar(app: &tauri::AppHandle) {
             let _ = child.kill();
         }
     }
+}
+
+/// Fire a loopback POST against the local API for tray-driven controls
+/// (pause / resume / stop). We shell out to `curl` rather than pulling
+/// in an HTTP crate — curl is always present on macOS, the call is
+/// best-effort, and a missing API just means the user toggled before
+/// the sidecar finished booting (or after it crashed).
+fn post_loopback(path: &str) {
+    let url = format!("http://127.0.0.1:3001{}", path);
+    let _ = Command::new("curl")
+        .arg("-fsS")
+        .arg("--max-time")
+        .arg("3")
+        .arg("-X")
+        .arg("POST")
+        .arg(&url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
 }

@@ -3,10 +3,10 @@ import { z } from 'zod';
 import { ActionSchema } from '@gam/shared';
 import { requireUser, getUserId } from '../auth/middleware.js';
 import { deleteFilter, listFilters, listLabels, type GmailFilter } from '../gmail/filters.js';
-import { GoogleTokenError, isInvalidGrant, markNeedsReauth } from '../gmail/client.js';
 import { logger } from '../logger.js';
 import { prisma } from '../db/client.js';
 import { translateFilters } from '../claude/translator.js';
+import { handleGmailError } from '../gmail/error.js';
 
 export const filtersRouter: RouterT = Router();
 
@@ -19,15 +19,6 @@ async function fetchFiltersAndLabels(userId: string) {
     if (l.id && l.name) labelMap[l.id] = l.name;
   }
   return { filters, labelMap };
-}
-
-function handleGmailError(err: unknown, userId: string, res: import('express').Response) {
-  if (err instanceof GoogleTokenError || isInvalidGrant(err)) {
-    void markNeedsReauth(userId);
-    res.status(401).json({ error: 'needs_reauth' });
-    return true;
-  }
-  return false;
 }
 
 filtersRouter.get('/', async (req, res) => {

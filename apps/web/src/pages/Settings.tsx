@@ -60,6 +60,7 @@ export function Settings() {
       <ClaudeModelSection />
       <SyncFrequencySection />
       <AiGuidanceSection />
+      <ForwardAllowlistSection />
       <AuditLogSection />
       <BackupRestoreSection />
       <RunHistorySection onOpen={setViewingRunId} />
@@ -638,6 +639,123 @@ function LearnedMemoryPanel({
           <div className="banner error" style={{ marginTop: '0.4rem' }}>
             {(consolidate.error as Error).message}
           </div>
+        )}
+      </div>
+    </details>
+  );
+}
+
+// Forward-action allowlist. Backed by GET/POST/DELETE /me/forward-allowlist.
+// Type matches the API's `ForwardingAddress`-derived shape.
+type ForwardTarget = {
+  id: string;
+  address: string;
+  verified: boolean;
+  updatedAt: string;
+};
+
+/**
+ * Forwarding addresses the user has approved for the `forward` action.
+ *
+ * Without an entry here, `applyAction` refuses to send mail, regardless
+ * of what a rule or the classifier proposes — that's the kill switch
+ * for inbox-exfiltration via a hostile rule. The user adds an address
+ * (which lands as `verified=false`) and confirms in a second click; the
+ * confirm is the explicit "yes, this app may forward to X."
+ */
+function ForwardAllowlistSection() {
+  const qc = useQueryClient();
+  const list = useQuery<{ items: ForwardTarget[] }>({
+    queryKey: ['forward-allowlist'],
+    queryFn: () => apiGet('/me/forward-allowlist'),
+  });
+  const [draft, setDraft] = useState('');
+
+  const add = useMutation<ForwardTarget, ApiError, string>({
+    mutationFn: (address) =>
+      apiSend('POST', '/me/forward-allowlist', { address }),
+    onSuccess: () => {
+      setDraft('');
+      qc.invalidateQueries({ queryKey: ['forward-allowlist'] });
+    },
+  });
+  const confirm = useMutation<ForwardTarget, Error, string>({
+    mutationFn: (id) =>
+      apiSend('POST', `/me/forward-allowlist/${id}/confirm`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['forward-allowlist'] }),
+  });
+  const remove = useMutation<void, Error, string>({
+    mutationFn: (id) => apiSend('DELETE', `/me/forward-allowlist/${id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['forward-allowlist'] }),
+  });
+
+  const items = list.data?.items ?? [];
+
+  return (
+    <details className="settings-section">
+      <summary>Forwarding addresses</summary>
+      <div className="settings-section-body">
+        <p className="settings-help">
+          Rules with a <code>forward</code> action can only send mail to
+          addresses confirmed here. New addresses land as <em>pending</em>
+          and need a second click to activate.
+        </p>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            const v = draft.trim();
+            if (v) add.mutate(v);
+          }}
+          className="settings-row"
+        >
+          <input
+            type="email"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder="assistant@example.com"
+            autoComplete="off"
+          />
+          <button type="submit" disabled={add.isPending || draft.trim().length < 3}>
+            Add
+          </button>
+        </form>
+        {add.error && (
+          <div className="settings-error">
+            {add.error.code === 'invalid_address'
+              ? 'That doesn’t look like a valid email address.'
+              : add.error.message}
+          </div>
+        )}
+        {items.length === 0 ? (
+          <div className="settings-empty">No forwarding addresses yet.</div>
+        ) : (
+          <ul className="forward-allowlist">
+            {items.map((it) => (
+              <li key={it.id} className={it.verified ? 'verified' : 'pending'}>
+                <span className="addr">{it.address}</span>
+                <span className="status">
+                  {it.verified ? 'confirmed' : 'pending confirmation'}
+                </span>
+                <span className="actions">
+                  {!it.verified && (
+                    <button
+                      onClick={() => confirm.mutate(it.id)}
+                      disabled={confirm.isPending}
+                    >
+                      Confirm
+                    </button>
+                  )}
+                  <button
+                    onClick={() => remove.mutate(it.id)}
+                    disabled={remove.isPending}
+                    className="danger"
+                  >
+                    Remove
+                  </button>
+                </span>
+              </li>
+            ))}
+          </ul>
         )}
       </div>
     </details>

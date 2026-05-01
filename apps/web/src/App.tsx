@@ -1,11 +1,12 @@
 import { Routes, Route, Navigate, useLocation, useNavigate, Link } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import type { MeDTO } from '@gam/shared';
 import { apiGet, apiSend, ApiError } from './lib/api.js';
 import { Login } from './pages/Login.js';
 import { Home } from './pages/Home.js';
 import { Settings } from './pages/Settings.js';
 
-type Me = { id: string; email: string; timezone: string; status: string };
+type Me = MeDTO;
 
 export function App() {
   const location = useLocation();
@@ -54,6 +55,14 @@ export function App() {
             </div>
           )}
         </header>
+      )}
+      {me?.claudeCli && me.claudeCli.ok === false && !onLogin && (
+        <div className="banner banner-error" role="alert">
+          <strong>Claude CLI not available.</strong> Rules can't fire until
+          this is fixed. Reason: {me.claudeCli.reason} —{' '}
+          <code>{me.claudeCli.detail.slice(0, 160)}</code>. Install or
+          restore <code>claude</code> on your PATH and restart the app.
+        </div>
       )}
       <main>
         <Routes>

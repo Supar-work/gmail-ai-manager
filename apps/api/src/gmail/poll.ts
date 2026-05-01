@@ -6,6 +6,7 @@ import { logger } from '../logger.js';
 
 let started = false;
 let timer: NodeJS.Timeout | null = null;
+let polling = false;
 
 const TICK_MS = 30_000;
 const lastPolledAt = new Map<string, number>();
@@ -22,10 +23,27 @@ export function stopPoller(): void {
   if (timer) clearInterval(timer);
   timer = null;
   started = false;
+  polling = false;
   lastPolledAt.clear();
 }
 
+// Re-entrancy guard: a slow Gmail tick (throttling, large user)
+// shouldn't stack with the next 30s interval. The previous run owns the
+// work; the new tick bows out.
 export async function pollAll(): Promise<void> {
+  if (polling) {
+    logger.debug('poll already running; skipping');
+    return;
+  }
+  polling = true;
+  try {
+    await pollAllInner();
+  } finally {
+    polling = false;
+  }
+}
+
+async function pollAllInner(): Promise<void> {
   const users = await prisma.user.findMany({
     where: { status: 'active', migratedAt: { not: null } },
     select: { id: true, pollIntervalSec: true },

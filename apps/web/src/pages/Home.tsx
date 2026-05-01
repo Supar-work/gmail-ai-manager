@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { Action } from '@gam/shared';
+import type { RuleDTO } from '@gam/shared';
 import { apiGet, apiSend, ApiError } from '../lib/api.js';
 import { RunLogPanel, useActiveRun } from '../components/RunLogPanel.js';
 import {
@@ -13,13 +13,10 @@ import { InboxCleanupWizard } from '../components/InboxCleanupWizard.js';
 
 // ── types ─────────────────────────────────────────────────────────────────
 
-type Rule = {
-  id: string;
-  naturalLanguage: string;
-  actionsJson: Action[];
-  enabled: boolean;
-  position: number;
-};
+// Wire shape from /api/rules. Imported from @gam/shared so the API and
+// web stay in lockstep — local declarations of the same shape were
+// drifting (missing fields, divergent timestamp types).
+type Rule = RuleDTO;
 type RulesResponse = { rules: Rule[] };
 
 type StartRunResponse = { runId: string };

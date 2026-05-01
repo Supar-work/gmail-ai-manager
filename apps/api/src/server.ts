@@ -20,13 +20,30 @@ import { modelsRouter } from './routes/models.js';
 import { gmailFiltersRouter } from './routes/gmail-filters.js';
 import { inboxCleanupRouter } from './routes/inbox-cleanup.js';
 import { agentActionsRouter } from './routes/agent-actions.js';
+import { controlRouter } from './routes/control.js';
 import { startScheduler } from './jobs/scheduler.js';
 import { startMemoryConsolidator } from './jobs/memory-consolidator.js';
+import { startPruner } from './jobs/pruner.js';
 import { startPoller } from './gmail/poll.js';
+import { localOnly } from './middleware/local-only.js';
+import { runClaudePreflight } from './claude/preflight.js';
 
 const app = express();
 
+app.use(cookieParser(env.SESSION_SECRET));
 app.use(pinoHttp({ logger }));
+
+// Reject any request whose Host header isn't loopback-on-our-port (DNS
+// rebinding) and any cross-site mutation (CSRF). Mounted before routers
+// and before the static SPA so it covers every path.
+app.use(
+  localOnly({
+    port: env.PORT,
+    // In dev, Vite serves the UI from a different port and proxies fetches
+    // here; allow its origin. Production is same-origin so this is empty.
+    extraOrigins: env.NODE_ENV !== 'production' ? [env.PUBLIC_WEB_URL] : [],
+  }),
+);
 
 // In dev, the web UI runs on a different port (Vite) so we need CORS. In
 // production the API serves the built UI and the request is same-origin.
@@ -38,7 +55,6 @@ if (env.NODE_ENV !== 'production') {
     }),
   );
 }
-app.use(cookieParser(env.SESSION_SECRET));
 // 10mb gives plenty of headroom for full-DB backup imports (a typical
 // user's rules + GmailFilter mirror is well under 1mb, but originalFilterJson
 // blobs can balloon for heavy Gmail users).
@@ -62,6 +78,7 @@ app.use('/api/models', modelsRouter);
 app.use('/api/gmail-filters', gmailFiltersRouter);
 app.use('/api/inbox-cleanup', inboxCleanupRouter);
 app.use('/api/agent-actions', agentActionsRouter);
+app.use('/api/control', controlRouter);
 
 if (env.NODE_ENV === 'production') {
   const here = path.dirname(fileURLToPath(import.meta.url));
@@ -78,9 +95,17 @@ app.use((err: unknown, _req: express.Request, res: express.Response, _next: expr
   res.status(500).json({ error: 'internal_error' });
 });
 
-app.listen(env.PORT, () => {
+// Bind to loopback only. The Tauri shell, the Vite dev server, and any
+// other consumer all reach us via 127.0.0.1; binding to 0.0.0.0 would
+// expose the API to the local network (and to DNS rebinding).
+app.listen(env.PORT, '127.0.0.1', () => {
   logger.info({ port: env.PORT, env: env.NODE_ENV }, 'api listening');
+  // Preflight runs in the background — don't block listening on it. The
+  // result lands in module state and is read by /me so the UI can show
+  // a banner when the CLI is missing.
+  void runClaudePreflight();
   startScheduler();
   startPoller();
   startMemoryConsolidator();
+  startPruner();
 });

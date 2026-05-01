@@ -12,7 +12,7 @@
   "app": {
     "windows": [],
     "security": {
-      "csp": null
+      "csp": "default-src 'self' http://localhost:3001 http://127.0.0.1:3001; script-src 'self' http://localhost:3001 http://127.0.0.1:3001; style-src 'self' 'unsafe-inline' http://localhost:3001 http://127.0.0.1:3001; connect-src 'self' http://localhost:3001 http://127.0.0.1:3001; img-src 'self' data: https:; font-src 'self' data:; frame-ancestors 'none'; base-uri 'self'"
     },
     "macOSPrivateApi": false
   },

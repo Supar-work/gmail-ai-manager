@@ -79,7 +79,7 @@ export async function classifyRecent(
 
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    select: { id: true, timezone: true, claudeModel: true },
+    select: { id: true, timezone: true, claudeModel: true, learnedMemoryAt: true },
   });
   if (!user) throw new Error('no_user');
 
@@ -144,12 +144,19 @@ export async function classifyRecent(
   }
 
   // ── cache-hit pre-filter ─────────────────────────────────────────────
-  // Pull every stored decision for the candidates in one go, plus the max
-  // updatedAt across currently-enabled rules. A decision is still valid iff:
+  // Pull every stored decision for the candidates in one go. A decision
+  // is still valid iff:
   //   decision.contentHistoryId === message.historyId   // message unchanged
   //   decision.updatedAt >= ruleSetUpdatedAt            // no rule edited since
-  const ruleSetUpdatedAt =
-    enabledRules.reduce<number>((max, r) => Math.max(max, r.updatedAt.getTime()), 0);
+  //   decision.updatedAt >= learnedMemoryAt             // memory not refreshed since
+  // The learnedMemory check matters because the consolidator updates
+  // learnedMemory in the background and that changes how the proposer
+  // would interpret the same email — without this gate, rule meaning
+  // drifts silently against cached decisions.
+  const ruleSetUpdatedAt = Math.max(
+    enabledRules.reduce<number>((max, r) => Math.max(max, r.updatedAt.getTime()), 0),
+    user.learnedMemoryAt?.getTime() ?? 0,
+  );
   const cachedDecisions = useCache
     ? await prisma.emailDecision.findMany({
         where: {

@@ -1,31 +1,9 @@
 import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import type { AnalyzeAction, AnalyzeResponse } from '@gam/shared';
 import { apiSend } from '../lib/api.js';
 
-// ── types ─────────────────────────────────────────────────────────────────
-
-export type AnalyzeAction = {
-  type:
-    | 'addLabel'
-    | 'removeLabel'
-    | 'archive'
-    | 'markRead'
-    | 'star'
-    | 'markImportant'
-    | 'trash'
-    | 'forward';
-  labelName?: string | null;
-  to?: string | null;
-  timing?: string | null;
-};
-
-export type AnalyzeResponse = {
-  summary: string;
-  actions: AnalyzeAction[];
-  warnings: string[];
-  suggestions?: string[];
-  suggestedRewrite?: string | null;
-};
+export type { AnalyzeAction, AnalyzeResponse };
 
 // ── panel: single "Check rule" entry point used from multiple places ──────
 //

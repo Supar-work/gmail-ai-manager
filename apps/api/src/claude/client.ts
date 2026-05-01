@@ -20,6 +20,58 @@ export type ClaudeOptions = {
 };
 
 const DEFAULT_TIMEOUT = 90_000;
+// Hard cap on prompt size sent to the CLI. Long inbox bodies (calendar
+// invites with mhtml attachments, long marketing emails) can land here
+// at megabyte scale; truncating bounds CLI memory + token cost without
+// losing the signal in the first 64 KB.
+const MAX_PROMPT_BYTES = 64 * 1024;
+// Hard cap on stdout we'll accumulate. Claude's JSON envelope for our
+// prompts is well under 100 KB; a runaway response (Claude looping on
+// the prompt) shouldn't be allowed to balloon Node's heap.
+const MAX_STDOUT_BYTES = 4 * 1024 * 1024;
+
+/**
+ * Build the env passed to the CLI subprocess. Explicit allowlist rather
+ * than a wholesale `{ ...process.env }` so any future API-side secret
+ * (an Anthropic key in this process for SDK-backed paths, a database
+ * password, etc.) doesn't get forwarded into a child we don't fully
+ * trust to redact its logs.
+ */
+function buildSubprocessEnv(): NodeJS.ProcessEnv {
+  const allow = [
+    'PATH',
+    'HOME',
+    'USER',
+    'LOGNAME',
+    'SHELL',
+    'TMPDIR',
+    'LANG',
+    'LC_ALL',
+    'LC_CTYPE',
+    'TERM',
+  ];
+  const out: NodeJS.ProcessEnv = {};
+  for (const k of allow) {
+    const v = process.env[k];
+    if (typeof v === 'string') out[k] = v;
+  }
+  // The CLI looks under $HOME/.claude for its auth + config — needs
+  // HOME at minimum. CLAUDE_* vars (CLAUDE_CONFIG_DIR, etc.) are
+  // intentionally NOT forwarded; the Tauri shell scrubs them before
+  // spawning the API for the same reason.
+  return out;
+}
+
+function truncatePrompt(prompt: string): string {
+  if (Buffer.byteLength(prompt, 'utf8') <= MAX_PROMPT_BYTES) return prompt;
+  // Slice on UTF-8 code units, not characters — preserves multibyte
+  // sequences. Reserve room for the truncation marker.
+  const marker = '\n\n[... truncated to fit prompt size cap ...]';
+  const budget = MAX_PROMPT_BYTES - Buffer.byteLength(marker, 'utf8');
+  const buf = Buffer.from(prompt, 'utf8').subarray(0, budget);
+  // Trim a possible split codepoint at the boundary.
+  return buf.toString('utf8') + marker;
+}
 
 /**
  * Run `claude -p` as a one-shot subprocess. The prompt is sent on stdin.
@@ -36,24 +88,38 @@ export async function runClaude(prompt: string, opts: ClaudeOptions = {}): Promi
   const args = ['-p', '--output-format', 'json', '--permission-mode', 'bypassPermissions'];
   if (model) args.push('--model', model);
 
+  const safePrompt = truncatePrompt(prompt);
+
   return await new Promise<string>((resolve, reject) => {
     const child = spawn(bin, args, {
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env },
+      env: buildSubprocessEnv(),
     });
 
     let stdout = '';
     let stderr = '';
+    let stdoutBytes = 0;
+    let stdoutOverflowed = false;
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
       reject(new ClaudeInvocationError(`claude_timeout_${opts.timeoutMs ?? DEFAULT_TIMEOUT}ms`, stderr));
     }, opts.timeoutMs ?? DEFAULT_TIMEOUT);
 
     child.stdout.on('data', (c: Buffer) => {
+      stdoutBytes += c.length;
+      if (stdoutBytes > MAX_STDOUT_BYTES) {
+        if (!stdoutOverflowed) {
+          stdoutOverflowed = true;
+          logger.warn({ stdoutBytes }, 'claude stdout exceeded cap; killing');
+          child.kill('SIGKILL');
+        }
+        return;
+      }
       stdout += c.toString('utf8');
     });
     child.stderr.on('data', (c: Buffer) => {
-      stderr += c.toString('utf8');
+      // Stderr is small; cap loosely so a misbehaving CLI can't OOM us.
+      if (stderr.length < 64 * 1024) stderr += c.toString('utf8');
     });
     child.on('error', (err) => {
       clearTimeout(timer);
@@ -109,7 +175,7 @@ export async function runClaude(prompt: string, opts: ClaudeOptions = {}): Promi
       }
     });
 
-    child.stdin.write(prompt);
+    child.stdin.write(safePrompt);
     child.stdin.end();
   });
 }

@@ -15,7 +15,7 @@ import {
 import { requireUser, getUserId } from '../auth/middleware.js';
 import { prisma } from '../db/client.js';
 import { syncInbox } from '../gmail/sync.js';
-import { GoogleTokenError, isInvalidGrant, markNeedsReauth } from '../gmail/client.js';
+import { handleGmailError } from '../gmail/error.js';
 import {
   proposeAndRefine,
   reproposeForEditedRule,
@@ -88,17 +88,6 @@ function proposalKey(userId: string, messageId: string, historyId: string | null
 
 function ruleHash(naturalLanguage: string): string {
   return createHash('sha256').update(naturalLanguage).digest('hex').slice(0, 16);
-}
-
-// ── Error helper (mirrors pattern in other routers) ────────────────────────
-
-function handleGmailError(err: unknown, userId: string, res: import('express').Response): boolean {
-  if (err instanceof GoogleTokenError || isInvalidGrant(err)) {
-    void markNeedsReauth(userId);
-    res.status(401).json({ error: 'needs_reauth' });
-    return true;
-  }
-  return false;
 }
 
 // ── Routes ─────────────────────────────────────────────────────────────────

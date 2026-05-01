@@ -100,6 +100,21 @@ export_json "User"        "users.json" \
 export_json "FilterBackup" "filter-backups.json" \
   'SELECT * FROM "FilterBackup" ORDER BY "userId", "createdAt"'
 
+# ── 4b. Snapshot the runtime .env (TOKEN_ENC_KEY + OAuth client secret) ─
+# Without this, a `restore --full` to a fresh machine leaves the
+# encrypted token columns in the snapshot DB unreadable: the AES key
+# lives only in $DATA_DIR/api/.env. We back it up next to the snapshot
+# with mode 600 so it's no more exposed than the source.
+ENV_SRC="$DATA_DIR/api/.env"
+if [ -f "$ENV_SRC" ]; then
+  cp "$ENV_SRC" "$OUT_DIR/api.env"
+  chmod 600 "$OUT_DIR/api.env"
+  printf "  ${GREEN}✓${RESET} api.env  ${DIM}(secrets — chmod 600)${RESET}\n"
+else
+  printf "  ${YELLOW}⚠${RESET} api/.env not found at %s — restore on a fresh\n" "$ENV_SRC"
+  printf "    machine will require re-running OAuth setup.\n"
+fi
+
 # ── 5. Gmail-filters-only plaintext dump (useful if Gmail ever wipes) ────
 # Small human-readable summary that's easy to eyeball.
 {
@@ -145,6 +160,7 @@ cat > "$OUT_DIR/RESTORE.md" <<'EOF'
 | File                  | Purpose                                                |
 |-----------------------|--------------------------------------------------------|
 | `data.db`             | Full SQLite snapshot — the safest thing to restore.    |
+| `api.env`             | TOKEN_ENC_KEY + OAuth client secret. Sensitive (600).  |
 | `rules.json`          | Rule table (AI rules you authored), pretty JSON.       |
 | `gmail-filters.json`  | GmailFilter table (Gmail filter mirrors), pretty JSON. |
 | `users.json`          | User settings (timezone, poll interval, claude model). |

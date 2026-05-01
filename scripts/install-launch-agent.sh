@@ -15,10 +15,14 @@
 set -euo pipefail
 
 LABEL="work.supar.gam"
+LOGROTATE_LABEL="work.supar.gam.logrotate"
 APP_BIN="$HOME/Applications/Gmail AI Manager.app/Contents/MacOS/gam-desktop"
 LOG_DIR="$HOME/Library/Logs/gmail-ai-manager"
 AGENT_DIR="$HOME/Library/LaunchAgents"
 PLIST="$AGENT_DIR/$LABEL.plist"
+LOGROTATE_PLIST="$AGENT_DIR/$LOGROTATE_LABEL.plist"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROTATE_SCRIPT="$SCRIPT_DIR/rotate-logs.sh"
 
 BOLD='\033[1m'
 GREEN='\033[0;32m'
@@ -91,7 +95,14 @@ fi
   -c "Add :EnvironmentVariables:HOME string $HOME" \
   -c "Add :KeepAlive dict" \
   -c "Add :KeepAlive:SuccessfulExit bool false" \
+  -c "Add :ThrottleInterval integer 30" \
   "$PLIST"
+
+# ThrottleInterval bounds the relaunch loop when the binary fails fast
+# (bad .env, port already taken, schema mismatch). Default is 10s; with
+# our crash-loop scenario that fills launchd.err.log within minutes.
+# 30s keeps the user-visible recovery time short while not bleeding the
+# disk dry overnight.
 
 # ── Security: plist must be owned by the user + 0644. ──────────────────
 chown "$UID_NUM" "$PLIST"
@@ -113,6 +124,42 @@ pkill -f "gmail-ai-manager/api/dist/server.js" 2>/dev/null || true
 sleep 1
 
 launchctl kickstart -k "$DOMAIN/$LABEL" 2>/dev/null || true
+
+# ── Sibling LaunchAgent: daily log rotation. ──────────────────────────
+# Without rotation the pino + launchd stdout streams climb to several
+# hundred MB/week on an active install. Run rotate-logs.sh once a day
+# at 03:30 local time; it caps each file at 10 MB and keeps 5 .gz
+# archives.
+if [ -x "$ROTATE_SCRIPT" ]; then
+  launchctl bootout "$DOMAIN/$LOGROTATE_LABEL" 2>/dev/null || true
+  launchctl unload  "$LOGROTATE_PLIST"          2>/dev/null || true
+  rm -f "$LOGROTATE_PLIST"
+
+  /usr/libexec/PlistBuddy \
+    -c "Add :Label string $LOGROTATE_LABEL" \
+    -c "Add :ProgramArguments array" \
+    -c "Add :ProgramArguments:0 string /bin/bash" \
+    -c "Add :ProgramArguments:1 string $ROTATE_SCRIPT" \
+    -c "Add :StartCalendarInterval dict" \
+    -c "Add :StartCalendarInterval:Hour integer 3" \
+    -c "Add :StartCalendarInterval:Minute integer 30" \
+    -c "Add :EnvironmentVariables dict" \
+    -c "Add :EnvironmentVariables:HOME string $HOME" \
+    -c "Add :EnvironmentVariables:LOG_DIR string $LOG_DIR" \
+    -c "Add :StandardOutPath string $LOG_DIR/logrotate.out.log" \
+    -c "Add :StandardErrorPath string $LOG_DIR/logrotate.err.log" \
+    "$LOGROTATE_PLIST"
+  chown "$UID_NUM" "$LOGROTATE_PLIST"
+  chmod 0644 "$LOGROTATE_PLIST"
+  if launchctl bootstrap "$DOMAIN" "$LOGROTATE_PLIST" 2>/dev/null; then
+    :
+  else
+    launchctl load -w "$LOGROTATE_PLIST"
+  fi
+  printf "${GREEN}✓ Installed log rotation${RESET} ${DIM}(daily 03:30, 10MB cap, 5 .gz)${RESET}\n"
+else
+  printf "${YELLOW}!${RESET} %s not executable — skipping log-rotation install\n" "$ROTATE_SCRIPT"
+fi
 
 printf "${GREEN}✓ Installed and started${RESET} ${DIM}(label: $LABEL)${RESET}\n"
 echo

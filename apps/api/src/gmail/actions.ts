@@ -3,10 +3,12 @@ import type { gmail_v1 } from 'googleapis';
 import { gmailForUser } from './client.js';
 import { logger } from '../logger.js';
 import {
+  beginAgentAction,
+  completeAgentAction,
   inverseAction,
-  recordAgentAction,
   type AuditSource,
 } from '../audit/record.js';
+import { isForwardTargetAllowed } from './forward-allowlist.js';
 
 /**
  * Optional audit context the caller passes when applying an action so the
@@ -35,6 +37,19 @@ export async function ensureLabel(userId: string, name: string): Promise<string>
   return created.data.id;
 }
 
+/**
+ * Thrown by `applyAction` when a `forward` action targets an address
+ * the user hasn't explicitly verified. The audit row is left in
+ * `failed` state and no Gmail mutation runs. Caller should surface this
+ * to the user (UI confirmation flow) rather than retrying blindly.
+ */
+export class ForwardNotAllowedError extends Error {
+  constructor(public readonly to: string) {
+    super(`forward target not allowed: ${to}`);
+    this.name = 'ForwardNotAllowedError';
+  }
+}
+
 export async function applyAction(
   userId: string,
   gmailMessageId: string,
@@ -52,24 +67,56 @@ export async function applyAction(
       { gmailMessageId, userId },
       'trash action downgraded to archive by safety guard',
     );
-    await gmail.users.messages.modify({
-      userId: 'me',
-      id: gmailMessageId,
-      requestBody: { removeLabelIds: ['INBOX'] },
-    });
-    // Audit-log the resulting archive (not the requested trash) so the
-    // user sees what actually happened.
-    await recordAuditFor(auditCtx, {
+    const downgraded: Action = { type: 'archive', runAt: action.runAt };
+    const auditId = await beginAuditFor(auditCtx, {
       userId,
       gmailMessageId,
-      action: { type: 'archive', runAt: action.runAt },
+      action: downgraded,
       reasoning: auditCtx?.reasoning ?? 'trash downgraded to archive (policy)',
     });
+    try {
+      await gmail.users.messages.modify({
+        userId: 'me',
+        id: gmailMessageId,
+        requestBody: { removeLabelIds: ['INBOX'] },
+      });
+      await markApplied(auditId);
+    } catch (err) {
+      await markFailed(auditId, err);
+      throw err;
+    }
     return;
   }
   if (action.type === 'forward') {
-    await forwardMessage(gmail, userId, gmailMessageId, action.to);
-    await recordAuditFor(auditCtx, { userId, gmailMessageId, action });
+    // Allowlist gate: refuse `forward` to any address the user hasn't
+    // explicitly confirmed. The audit row is still written (as `failed`)
+    // so the attempt is visible in Settings → Audit log.
+    const allowed = await isForwardTargetAllowed(userId, action.to);
+    if (!allowed) {
+      const auditId = await beginAuditFor(auditCtx, {
+        userId,
+        gmailMessageId,
+        action,
+        reasoning:
+          (auditCtx?.reasoning ? `${auditCtx.reasoning}; ` : '') +
+          `forward target ${action.to} not in user allowlist`,
+      });
+      const err = new ForwardNotAllowedError(action.to);
+      await markFailed(auditId, err);
+      throw err;
+    }
+    const auditId = await beginAuditFor(auditCtx, {
+      userId,
+      gmailMessageId,
+      action,
+    });
+    try {
+      await forwardMessage(gmail, userId, gmailMessageId, action.to);
+      await markApplied(auditId);
+    } catch (err) {
+      await markFailed(auditId, err);
+      throw err;
+    }
     return;
   }
 
@@ -98,15 +145,30 @@ export async function applyAction(
 
   if (addLabelIds.length === 0 && removeLabelIds.length === 0) return;
 
-  await gmail.users.messages.modify({
-    userId: 'me',
-    id: gmailMessageId,
-    requestBody: { addLabelIds, removeLabelIds },
+  const auditId = await beginAuditFor(auditCtx, {
+    userId,
+    gmailMessageId,
+    action,
   });
-  await recordAuditFor(auditCtx, { userId, gmailMessageId, action });
+  try {
+    await gmail.users.messages.modify({
+      userId: 'me',
+      id: gmailMessageId,
+      requestBody: { addLabelIds, removeLabelIds },
+    });
+    await markApplied(auditId);
+  } catch (err) {
+    await markFailed(auditId, err);
+    throw err;
+  }
 }
 
-async function recordAuditFor(
+/**
+ * Pre-write a pending audit row, returning its id. When `auditCtx` is
+ * undefined (admin scripts, tests) returns null and the apply path skips
+ * the audit log entirely.
+ */
+async function beginAuditFor(
   auditCtx: ApplyAuditCtx | undefined,
   payload: {
     userId: string;
@@ -114,9 +176,9 @@ async function recordAuditFor(
     action: Action;
     reasoning?: string | null;
   },
-): Promise<void> {
-  if (!auditCtx) return;
-  await recordAgentAction({
+): Promise<string | null> {
+  if (!auditCtx) return null;
+  return beginAgentAction({
     userId: payload.userId,
     source: auditCtx.source,
     sourceId: auditCtx.sourceId ?? null,
@@ -127,6 +189,14 @@ async function recordAuditFor(
     reasoning: payload.reasoning ?? auditCtx.reasoning ?? null,
     reversibleAs: inverseAction(payload.action),
   });
+}
+
+async function markApplied(auditId: string | null): Promise<void> {
+  if (auditId) await completeAgentAction(auditId, 'applied');
+}
+
+async function markFailed(auditId: string | null, err: unknown): Promise<void> {
+  if (auditId) await completeAgentAction(auditId, 'failed', { error: err });
 }
 
 async function forwardMessage(

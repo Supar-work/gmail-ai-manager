@@ -85,6 +85,15 @@ model AgentAction {
   reversibleAs   String?
   reversedAt     DateTime?
   reversedBy     String?
+  // Lifecycle: "pending" rows are pre-written before the underlying
+  // mutation; on success they flip to "applied" with appliedAt set, on
+  // failure to "failed" with errorMessage set. Crash between mutation
+  // and flip leaves a "pending" row visible to the user, never a silent
+  // mutation. Default "applied" so legacy callers stay backwards
+  // compatible.
+  status         String   @default("applied") // "pending" | "applied" | "failed"
+  appliedAt      DateTime?
+  errorMessage   String?
   createdAt      DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -92,6 +101,9 @@ model AgentAction {
   @@index([userId, createdAt])
   @@index([userId, source, createdAt])
   @@index([userId, targetType, targetId])
+  // Used by the reversal endpoint (find the audit row a chat reverse
+  // points back at) and by scheduler dedup (forward already happened?).
+  @@index([userId, sourceId])
 }
 
 // Authoritative local mirror of every Gmail filter we've ever seen for this
@@ -237,7 +249,7 @@ model ScheduledAction {
   gmailMessageId String
   action         String   // JSON-encoded Action
   runAt          DateTime
-  status         String   @default("pending") // pending | done | cancelled | failed | skipped
+  status         String   @default("pending") // pending | running | done | cancelled | failed | skipped | stale
   reasoning      String?
   attempts       Int      @default(0)
   lastError      String?

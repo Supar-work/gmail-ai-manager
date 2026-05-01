@@ -6,13 +6,25 @@ import { logger } from '../logger.js';
  * Single source of truth for the agent-action audit log.
  *
  * Every code path that mutates Gmail or persists rules / schedules /
- * other side-effects calls `recordAgentAction(...)` so the user has one
- * place — Settings → Audit log — to see what the system did and undo it
- * when something is wrong.
+ * other side-effects calls into this module so the user has one place —
+ * Settings → Audit log — to see what the system did and undo it when
+ * something is wrong. Chat-driven mutations (MCP tools) and rule-driven
+ * mutations land in the same table with the same shape.
  *
- * The chat agent (when MCP lands) calls this through the same set of
- * helpers, so chat-driven mutations and rule-driven mutations land in
- * the same table with the same shape.
+ * Two write modes:
+ *   - `recordAgentAction`        one-shot, written as `applied`. Use for
+ *                                operations that succeed or throw atomically
+ *                                (rules.create, settings updates, etc.).
+ *   - `beginAgentAction` →
+ *     `completeAgentAction`      pre-write a `pending` row, run the
+ *                                external mutation (Gmail), flip to
+ *                                `applied`/`failed`. A crash between the
+ *                                two leaves a visible `pending` row
+ *                                instead of an invisible mutation.
+ *
+ * Both modes throw on DB failure rather than swallowing — the audit log
+ * is the trust mechanism, so a failed write means the caller must abort
+ * (or, for `complete*`, surface the inconsistency loudly).
  */
 
 export type AuditSource =
@@ -48,32 +60,112 @@ export type RecordInput = {
   reversibleAs?: Action | null;
 };
 
-export async function recordAgentAction(input: RecordInput): Promise<string> {
+export type CompleteOutcome = 'applied' | 'failed';
+
+export interface CompleteMeta {
+  /** Optional Gmail-API result blob captured after the mutation. */
+  toolResultJson?: string | null;
+  /** Error captured when outcome === 'failed'. Stringified before storage. */
+  error?: unknown;
+}
+
+/**
+ * Pre-write a "pending" audit row before the underlying mutation runs.
+ * Returns the row id. Throws on DB write failure — the caller must NOT
+ * proceed with the mutation in that case (an unaudited mutation is the
+ * thing this whole log exists to prevent).
+ */
+export async function beginAgentAction(input: RecordInput): Promise<string> {
+  const row = await prisma.agentAction.create({
+    data: {
+      userId: input.userId,
+      source: input.source,
+      sourceId: input.sourceId ?? null,
+      targetType: input.targetType,
+      targetId: input.targetId,
+      toolName: input.toolName,
+      toolInputJson: input.toolInputJson,
+      toolResultJson: input.toolResultJson ?? null,
+      reasoning: input.reasoning ?? null,
+      reversibleAs: input.reversibleAs ? JSON.stringify(input.reversibleAs) : null,
+      status: 'pending',
+    },
+    select: { id: true },
+  });
+  return row.id;
+}
+
+/**
+ * Flip a pending row to its terminal state. `applied` sets `appliedAt`
+ * to now; `failed` records `errorMessage`. Logs (but does not throw) on
+ * DB failure: the underlying mutation already happened, so the system
+ * should keep moving and surface the inconsistency in logs/metrics.
+ */
+export async function completeAgentAction(
+  id: string,
+  outcome: CompleteOutcome,
+  meta: CompleteMeta = {},
+): Promise<void> {
+  const errorMessage =
+    outcome === 'failed' ? stringifyError(meta.error) : null;
   try {
-    const row = await prisma.agentAction.create({
+    await prisma.agentAction.update({
+      where: { id },
       data: {
-        userId: input.userId,
-        source: input.source,
-        sourceId: input.sourceId ?? null,
-        targetType: input.targetType,
-        targetId: input.targetId,
-        toolName: input.toolName,
-        toolInputJson: input.toolInputJson,
-        toolResultJson: input.toolResultJson ?? null,
-        reasoning: input.reasoning ?? null,
-        reversibleAs: input.reversibleAs ? JSON.stringify(input.reversibleAs) : null,
+        status: outcome,
+        appliedAt: outcome === 'applied' ? new Date() : null,
+        errorMessage,
+        ...(meta.toolResultJson !== undefined
+          ? { toolResultJson: meta.toolResultJson }
+          : {}),
       },
-      select: { id: true },
     });
-    return row.id;
   } catch (err) {
-    // Audit-log writes must never block a real mutation. Log the failure
-    // and return a sentinel so the caller can keep going.
-    logger.warn(
-      { err, userId: input.userId, toolName: input.toolName, targetId: input.targetId },
-      'audit log write failed',
+    logger.error(
+      { err, auditId: id, outcome },
+      'audit-log complete failed; row stuck as pending',
     );
-    return '';
+  }
+}
+
+/**
+ * One-shot record. The mutation either succeeded (call this after) or
+ * failed atomically (do not call). Throws on DB failure.
+ *
+ * Prefer `beginAgentAction` + `completeAgentAction` whenever the
+ * underlying operation can crash mid-flight (Gmail mutation, network
+ * call). Use this only when the audit row IS the operation
+ * (rules.create, settings update).
+ */
+export async function recordAgentAction(input: RecordInput): Promise<string> {
+  const row = await prisma.agentAction.create({
+    data: {
+      userId: input.userId,
+      source: input.source,
+      sourceId: input.sourceId ?? null,
+      targetType: input.targetType,
+      targetId: input.targetId,
+      toolName: input.toolName,
+      toolInputJson: input.toolInputJson,
+      toolResultJson: input.toolResultJson ?? null,
+      reasoning: input.reasoning ?? null,
+      reversibleAs: input.reversibleAs ? JSON.stringify(input.reversibleAs) : null,
+      status: 'applied',
+      appliedAt: new Date(),
+    },
+    select: { id: true },
+  });
+  return row.id;
+}
+
+function stringifyError(err: unknown): string | null {
+  if (err == null) return null;
+  if (err instanceof Error) return err.message;
+  if (typeof err === 'string') return err;
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
   }
 }
 

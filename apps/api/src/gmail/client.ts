@@ -72,8 +72,25 @@ export async function gmailForUser(userId: string): Promise<gmail_v1.Gmail> {
 }
 
 export function isInvalidGrant(err: unknown): boolean {
-  const e = err as { response?: { data?: { error?: string } } };
-  return e?.response?.data?.error === 'invalid_grant';
+  const e = err as
+    | {
+        response?: { data?: { error?: string } };
+        message?: string;
+        code?: string | number;
+      }
+    | null
+    | undefined;
+  if (!e) return false;
+  if (e.response?.data?.error === 'invalid_grant') return true;
+  // googleapis sometimes throws a plain Error('invalid_grant') with no
+  // .response payload — this happens on token refresh failures inside
+  // GoogleAuth#getAccessToken. Match the message so we still flip the
+  // user to needsReauth instead of streaming "poll failed" warnings
+  // forever.
+  if (typeof e.message === 'string' && e.message.toLowerCase().includes('invalid_grant')) {
+    return true;
+  }
+  return false;
 }
 
 export async function markNeedsReauth(userId: string): Promise<void> {

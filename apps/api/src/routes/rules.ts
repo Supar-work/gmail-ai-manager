@@ -214,12 +214,39 @@ rulesRouter.post('/analyze', async (req, res) => {
       model: ANALYZE_MODEL,
       timeoutMs: ANALYZE_TIMEOUT_MS,
     });
-    res.json(result);
+    // Add a warning for any `forward` action whose target the user
+    // hasn't allowlisted yet — saving the rule won't fail, but the
+    // first apply will be refused by the allowlist guard. Surfacing
+    // this here gives the user a chance to confirm in Settings before
+    // hitting the wall.
+    const extra = await forwardWarnings(userId, result.actions);
+    res.json({ ...result, warnings: [...result.warnings, ...extra] });
   } catch (err) {
     logger.warn({ err, userId }, 'rule analyze failed');
     res.status(500).json({ error: 'analyze_failed', message: err instanceof Error ? err.message : String(err) });
   }
 });
+
+async function forwardWarnings(
+  userId: string,
+  actions: { type: string; to?: string | null }[],
+): Promise<string[]> {
+  const targets = actions
+    .filter((a) => a.type === 'forward' && typeof a.to === 'string')
+    .map((a) => (a.to as string).trim().toLowerCase());
+  if (targets.length === 0) return [];
+  const unique = Array.from(new Set(targets));
+  const verified = await prisma.forwardingAddress.findMany({
+    where: { userId, address: { in: unique }, verified: true },
+    select: { address: true },
+  });
+  const verifiedSet = new Set(verified.map((v) => v.address));
+  const missing = unique.filter((a) => !verifiedSet.has(a));
+  return missing.map(
+    (a) =>
+      `Forward target ${a} is not in your confirmed forwarding addresses — add and confirm it in Settings before this rule will fire.`,
+  );
+}
 
 // ── rewrite-with-label ────────────────────────────────────────────────────
 // When the user accepts a canonical label suggestion in the translate wizard,
